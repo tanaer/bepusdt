@@ -22,7 +22,7 @@
 
 - 商户ID：搭建`BEpusdt`时候的参数`AUTH_TOKEN`
 - 支付标识：即收款交易类型，可选`tron.trx usdt.trc20 usdt.erc20`
-  等，[可选列表参考](https://github.com/v03413/BEpusdt/blob/62758f24689a81853a215d122a6012bac8364a82/app/model/orders.go#L25:L30)！
+  等，[可选列表参考](https://muskapi.com/blob/62758f24689a81853a215d122a6012bac8364a82/app/model/orders.go#L25:L30)！
 - 商户密钥：固定格式为`https://token.pay.com/api/v1/order/create-transaction` ，域名请自行替换
 - 支付处理路由：固定填写`pay/epusdt`
 

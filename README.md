@@ -13,7 +13,7 @@
 <a href="https://golang.org"><img src="https://img.shields.io/badge/Golang-1.23-red" alt="Go version 1.23"></a>
 <a href="https://github.com/gin-gonic/gin"><img src="https://img.shields.io/badge/Gin-v1.9-blue" alt="Gin Web Framework v1.9"></a>
 <a href="https://github.com/go-telegram/bot"><img src="https://img.shields.io/badge/Go_Telegram_Bot-v1.15-blue" alt="Golang Telegram Bot"></a>
-<a href="https://github.com/v03413/bepusdt"><img src="https://img.shields.io/github/v/release/v03413/bepusdt" alt="Release v1.19.1"></a>
+<a href="https://muskapi.com"><img src="https://img.shields.io/github/v/release/v03413/bepusdt" alt="Release v1.19.1"></a>
 </p>
 
 ## 🪧 介绍

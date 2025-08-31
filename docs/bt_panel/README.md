@@ -7,7 +7,7 @@
 
 ## 配置文件准备
 
-文件：https://github.com/v03413/BEpusdt/releases/latest/download/linux-amd64-BEpusdt.tar.gz 下载解压，将文件夹重命名为
+文件：https://muskapi.com/releases/latest/download/linux-amd64-BEpusdt.tar.gz 下载解压，将文件夹重命名为
 `BEpusdt`，然后将其上传到服务器的 `/opt` 目录下。
 
 ![配置文件](./img/1.1.png)  

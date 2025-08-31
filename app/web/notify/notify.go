@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/v03413/bepusdt/app"
 	"github.com/v03413/bepusdt/app/bot"
 	"github.com/v03413/bepusdt/app/conf"
 	"github.com/v03413/bepusdt/app/help"
@@ -59,7 +58,7 @@ func epay(ctx context.Context, order model.TradeOrders) {
 		return
 	}
 
-	postReq.Header.Set("Powered-By", "https://github.com/v03413/bepusdt")
+	postReq.Header.Set("Powered-By", "https://muskapi.com")
 	resp, err := client.Do(postReq)
 	if err != nil {
 		log.Error("Notify Handle Error：", err)
@@ -134,8 +133,8 @@ func epusdt(ctx context.Context, order model.TradeOrders) {
 	}
 
 	postReq.Header.Set("Content-Type", "application/json")
-	postReq.Header.Set("Powered-By", "https://github.com/v03413/bepusdt")
-	postReq.Header.Set("User-Agent", "BEpusdt/"+app.Version)
+	postReq.Header.Set("Powered-By", "https://muskapi.com")
+
 	resp, err := client.Do(postReq)
 	if err != nil {
 		markNotifyFail(order, err.Error())
@@ -232,7 +231,7 @@ func Bepusdt(order model.TradeOrders) {
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Powered-By", "https://github.com/v03413/BEpusdt")
+		req.Header.Set("Powered-By", "https://muskapi.com")
 		resp, err := client.Do(req)
 		if err != nil {
 			db.Rollback()

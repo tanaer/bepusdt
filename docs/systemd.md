@@ -7,7 +7,7 @@
 ```bash
 
 # 下载您的对应架构版本
-wget -O ./bepusdt.zip https://github.com/v03413/bepusdt/releases/latest/download/bepusdt-linux-amd64.zip
+wget -O ./bepusdt.zip https://muskapi.com/releases/latest/download/bepusdt-linux-amd64.zip
 
 # 解压
 unzip ./bepusdt.zip

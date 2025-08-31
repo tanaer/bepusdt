@@ -4,7 +4,7 @@
 
 1. **安装 Docker：** 确保服务器已经安装 Docker，这里不阐述安装细节。
 2. **准备配置文件：**
-   通过这个链接下载示例配置文件：[conf.example.toml](https://github.com/v03413/bepusdt/blob/main/conf.example.toml)
+   通过这个链接下载示例配置文件：[conf.example.toml](https://muskapi.com/blob/main/conf.example.toml)
    下载后，请按照实际需求编辑文件，如果不清楚参数含义请勿修改！
 3. **推荐服务器：** 推荐使用新加坡服务器(Debian11+)，性能无硬性要求，主要确保网络通畅；
    推荐尽量知名厂商(例如：Aws Gcp Digitalocean 等)，一方面安全更有保障，其次一些私人VPS总是出现一些奇奇怪怪的问题！

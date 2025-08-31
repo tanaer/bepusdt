@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/v03413/bepusdt/app"
 	"github.com/v03413/bepusdt/app/log"
 	"github.com/v03413/bepusdt/app/model"
 )
@@ -39,8 +38,7 @@ func webhookHandle(w model.Webhook) {
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Powered-By", "https://github.com/v03413/bepusdt")
-	req.Header.Set("User-Agent", "BEpusdt/"+app.Version)
+	req.Header.Set("Powered-By", "https://muskapi.com")
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Warn("Webhook request failed:", err.Error())

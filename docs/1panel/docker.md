@@ -11,7 +11,7 @@
 
 ![图片描述](./img/1.3.png)
 
-准备配置文件 https://github.com/v03413/BEpusdt/raw/main/conf.simple.toml 将此文件下载后重命名为 `conf.toml`，随后上传到
+准备配置文件 https://muskapi.com/raw/main/conf.simple.toml 将此文件下载后重命名为 `conf.toml`，随后上传到
 `/opt/BEpusdt` 文件夹中；图中方框特别标记的内容必须修改，其它内容按需调整。
 
 ## 创建启动 BEpusdt 容器

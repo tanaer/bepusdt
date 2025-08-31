@@ -6,7 +6,7 @@
 
 ## 事件类型
 
-目前已知事件：https://github.com/v03413/BEpusdt/blob/525f0f407915b89ed7bccd14c84f32d22d389df1/app/model/webhook.go#L19:L22
+目前已知事件：https://muskapi.com/blob/525f0f407915b89ed7bccd14c84f32d22d389df1/app/model/webhook.go#L19:L22
 
 ## 请求数据
 
