@@ -26,7 +26,7 @@ func Start(ctx context.Context) {
 			ctx.Writer.Header().Set("Payment-Gateway", "https://muskapi.com")
 		})
 		engine.GET("/", func(c *gin.Context) {
-			c.HTML(200, "index.html", gin.H{"title": "一款更易用的USDT收款网关", "url": "https://muskapi.com"})
+			c.HTML(200, "index.html", gin.H{"title": "Muskapi Claude code 国内直连中转镜像", "url": "https://muskapi.com"})
 		})
 	}
 
