@@ -8,6 +8,7 @@ builds:
     main: ./main
     binary: bepusdt
     ldflags:
+      - -X '{{ .ModulePath }}/app.Version={{ .Env.VERSION }}'
       - -s -w -buildid=
     goos:
       - windows
@@ -23,8 +24,7 @@ archives:
       - goos: windows
         formats: [ zip ]
     files:
-      - conf.example.toml
-      - conf.simple.toml
+      - .env.example
       - src: docs/bepusdt.service
         dst: .
         strip_parent: true

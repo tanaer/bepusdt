@@ -6,16 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-telegram/bot"
-	"github.com/go-telegram/bot/models"
 	"github.com/shopspring/decimal"
 	"github.com/smallnest/chanx"
-	"github.com/spf13/cast"
-	bot2 "github.com/v03413/bepusdt/app/bot"
 	"github.com/v03413/bepusdt/app/conf"
-	"github.com/v03413/bepusdt/app/help"
 	"github.com/v03413/bepusdt/app/model"
-	"github.com/v03413/bepusdt/app/web/notify"
+	"github.com/v03413/bepusdt/app/notifier"
+	"github.com/v03413/bepusdt/app/task/notify"
 	"github.com/v03413/tronprotocol/core"
 )
 
@@ -26,8 +22,8 @@ type transfer struct {
 	FromAddress string
 	RecvAddress string
 	Timestamp   time.Time
-	TradeType   string
-	BlockNum    int64
+	TradeType   model.TradeType
+	BlockNum    int
 }
 
 type resource struct {
@@ -44,202 +40,217 @@ var resourceQueue = chanx.NewUnboundedChan[[]resource](context.Background(), 30)
 var notOrderQueue = chanx.NewUnboundedChan[[]transfer](context.Background(), 30) // 非订单队列
 var transferQueue = chanx.NewUnboundedChan[[]transfer](context.Background(), 30) // 交易转账队列
 
+const batchInterval = time.Second * 1       // 批处理缓解数据库读取压力
+const orderCheckInterval = time.Second * 10 // 订单过期检查间隔
+
 func init() {
-	register(task{callback: orderTransferHandle})
-	register(task{callback: notOrderTransferHandle})
-	register(task{callback: tronResourceHandle})
+	Register(Task{Callback: orderTransferHandle})
+	Register(Task{Callback: notOrderTransferHandle})
+	Register(Task{Callback: tronResourceHandle})
 }
 
-func markFinalConfirmed(o model.TradeOrders) {
-	model.PushWebhookEvent(model.WebhookEventOrderPaid, o)
+func orderTransferHandle(ctx context.Context) {
+	var batch = make([]transfer, 0, 1000)
+	var lastCheckTime = time.Now()
+	ticker := time.NewTicker(batchInterval)
+	defer ticker.Stop()
 
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case transfers, ok := <-transferQueue.Out:
+			if !ok {
+				return
+			}
+			batch = append(batch, transfers...)
+		case <-ticker.C:
+			// 每10秒强制检查一次过期订单，即使没有交易，防止无交易时订单不过期
+			var shouldCheck = time.Since(lastCheckTime) >= orderCheckInterval
+			if len(batch) == 0 && !shouldCheck {
+				continue
+			}
+
+			if shouldCheck {
+				lastCheckTime = time.Now()
+			}
+
+			var other = make([]transfer, 0)
+			// getAllWaitingOrders 内部包含过期检查逻辑
+			var orders = getAllWaitingOrders()
+			if len(batch) == 0 {
+				continue
+			}
+			for _, t := range batch {
+				// 判断数额是否在允许范围内
+				if !model.IsAmountValid(t.TradeType, t.Amount) {
+					continue
+				}
+
+				key := fmt.Sprintf("%s%s", t.RecvAddress, t.TradeType)
+				orderList, ok := orders[key]
+				if !ok {
+					other = append(other, t)
+					continue
+				}
+
+				var matched bool
+				for _, o := range orderList {
+					// 金额前缀匹配
+					if !amountMatch(t.Amount, o.Amount, string(o.TradeType)) {
+
+						continue
+					}
+
+					// 有效期检测
+					if !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
+
+						continue
+					}
+
+					// 找到匹配的订单
+					o.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp)
+					matched = true
+					break
+				}
+
+				if !matched {
+					other = append(other, t)
+				}
+			}
+
+			if len(other) > 0 {
+				notOrderQueue.In <- other
+			}
+
+			batch = batch[:0]
+		}
+	}
+}
+
+func notOrderTransferHandle(ctx context.Context) {
+	var batch = make([]transfer, 0, 1000)
+	ticker := time.NewTicker(batchInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case transfers, ok := <-notOrderQueue.Out:
+			if !ok {
+				return
+			}
+			batch = append(batch, transfers...)
+		case <-ticker.C:
+			if len(batch) == 0 {
+				continue
+			}
+
+			var was = make([]model.Wallet, 0)
+			model.Db.Where("other_notify = ?", model.WaOtherEnable).Find(&was)
+			for _, wa := range was {
+				for _, t := range batch {
+					if t.RecvAddress != wa.MatchAddr && t.FromAddress != wa.MatchAddr {
+						continue
+					}
+
+					if !model.IsNeedNotifyByTxid(t.TxHash) {
+						continue
+					}
+
+					var record = model.NotifyRecord{Txid: t.TxHash}
+					model.Db.Create(&record)
+
+					notifier.NonOrderTransfer(model.TronTransfer(t), wa)
+				}
+			}
+
+			batch = batch[:0]
+		}
+	}
+}
+
+func tronResourceHandle(ctx context.Context) {
+	var batch = make([]resource, 0, 1000)
+	ticker := time.NewTicker(batchInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case resources, ok := <-resourceQueue.Out:
+			if !ok {
+				return
+			}
+			batch = append(batch, resources...)
+		case <-ticker.C:
+			if len(batch) == 0 {
+				continue
+			}
+
+			var was []model.Wallet
+			model.Db.Where("status = ? and other_notify = ?", model.WaStatusEnable, model.WaOtherEnable).Find(&was)
+
+			for _, wa := range was {
+				if wa.GetNetwork() != conf.Tron {
+					// 只有 Tron 网络目前才有资源变更通知
+					continue
+				}
+
+				for _, r := range batch {
+					if r.RecvAddress != wa.Address && r.FromAddress != wa.Address {
+						continue
+					}
+					if r.ResourceCode != core.ResourceCode_ENERGY {
+						continue
+					}
+					if !model.IsNeedNotifyByTxid(r.ID) {
+						continue
+					}
+
+					var record = model.NotifyRecord{Txid: r.ID}
+					model.Db.Create(&record)
+
+					notifier.TronResourceChange(model.TronResource(r))
+				}
+			}
+
+			batch = batch[:0]
+		}
+	}
+}
+
+func markFinalConfirmed(o model.Order) {
 	o.SetSuccess()
 
-	go notify.Handle(o)         // 通知订单支付成功
-	go bot2.SendTradeSuccMsg(o) // TG发送订单信息
+	go notify.Handle(o)    // 订单回调
+	go notifier.Success(o) // 消息通知
 }
 
-func orderTransferHandle(context.Context) {
-	for transfers := range transferQueue.Out {
-		var other = make([]transfer, 0)
-		var orders = getAllWaitingOrders()
-		for _, t := range transfers {
-			// debug
-			//if t.TradeType == model.OrderTradeTypeUsdcBep20 {
-			//	fmt.Println(t.TradeType, t.TxHash, t.FromAddress, "=>", t.RecvAddress, t.Amount.String())
-			//}
-
-			// 判断金额是否在允许范围内
-			if !inAmountRange(t.Amount) {
-
-				continue
-			}
-
-			// 判断是否存在对应订单
-			o, ok := orders[fmt.Sprintf("%s%v%s", t.RecvAddress, t.Amount.String(), t.TradeType)]
-			if !ok {
-				other = append(other, t)
-
-				continue
-			}
-
-			// 有效期检测
-			if !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
-
-				continue
-			}
-
-			// 进入确认状态
-			o.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp)
-		}
-
-		if len(other) > 0 {
-			notOrderQueue.In <- other
-		}
-	}
-}
-
-func notOrderTransferHandle(context.Context) {
-	for transfers := range notOrderQueue.Out {
-		var was []model.WalletAddress
-
-		model.DB.Where("other_notify = ?", model.OtherNotifyEnable).Find(&was)
-
-		for _, wa := range was {
-			for _, t := range transfers {
-				if t.RecvAddress != wa.Address && t.FromAddress != wa.Address {
-
-					continue
-				}
-
-				if !inAmountRange(t.Amount) {
-
-					continue
-				}
-
-				if !model.IsNeedNotifyByTxid(t.TxHash) {
-
-					continue
-				}
-
-				var title = "收入"
-				if t.RecvAddress != wa.Address {
-					title = "支出"
-				}
-
-				var text = fmt.Sprintf(
-					"\\#账户%s \\#非订单交易\n\\-\\-\\-\n```\n💲交易数额：%v \n💍交易类别："+strings.ToUpper(t.TradeType)+"\n⏱️交易时间：%v\n✅接收地址：%v\n🅾️发送地址：%v```\n",
-					title,
-					t.Amount.String(),
-					t.Timestamp.Format(time.DateTime),
-					help.MaskAddress(t.RecvAddress),
-					help.MaskAddress(t.FromAddress),
-				)
-
-				var record = model.NotifyRecord{Txid: t.TxHash}
-				model.DB.Create(&record)
-
-				go bot2.SendMessage(&bot.SendMessageParams{
-					ChatID:    conf.BotNotifyTarget(),
-					Text:      text,
-					ParseMode: models.ParseModeMarkdown,
-					ReplyMarkup: models.InlineKeyboardMarkup{
-						InlineKeyboard: [][]models.InlineKeyboardButton{
-							{
-								models.InlineKeyboardButton{Text: "📝查看交易明细", URL: model.GetDetailUrl(t.TradeType, t.TxHash)},
-							},
-						},
-					},
-				})
-			}
-		}
-	}
-}
-
-func tronResourceHandle(context.Context) {
-	for resources := range resourceQueue.Out {
-		var was []model.WalletAddress
-		var types = []string{model.OrderTradeTypeTronTrx, model.OrderTradeTypeUsdtTrc20}
-
-		model.DB.Where("status = ? and other_notify = ? and trade_type in (?)", model.StatusEnable, model.OtherNotifyEnable, types).Find(&was)
-
-		for _, wa := range was {
-			for _, t := range resources {
-				if t.RecvAddress != wa.Address && t.FromAddress != wa.Address {
-
-					continue
-				}
-
-				if t.ResourceCode != core.ResourceCode_ENERGY {
-
-					continue
-				}
-
-				var url = "https://tronscan.org/#/transaction/" + t.ID
-				if !model.IsNeedNotifyByTxid(t.ID) {
-
-					continue
-				}
-
-				var title = "代理"
-				if t.Type == core.Transaction_Contract_UnDelegateResourceContract {
-					title = "回收"
-				}
-
-				var text = fmt.Sprintf(
-					"\\#资源动态 \\#能量"+title+"\n\\-\\-\\-\n```\n🔋质押数量："+cast.ToString(t.Balance/1000000)+"\n⏱️交易时间：%v\n✅操作地址：%v\n🅾️资源来源：%v```\n",
-					t.Timestamp.Format(time.DateTime),
-					help.MaskAddress(t.RecvAddress),
-					help.MaskAddress(t.FromAddress),
-				)
-
-				var record = model.NotifyRecord{Txid: t.ID}
-				model.DB.Create(&record)
-
-				go bot2.SendMessage(&bot.SendMessageParams{
-					ChatID:    conf.BotNotifyTarget(),
-					Text:      text,
-					ParseMode: models.ParseModeMarkdown,
-					ReplyMarkup: models.InlineKeyboardMarkup{
-						InlineKeyboard: [][]models.InlineKeyboardButton{
-							{
-								models.InlineKeyboardButton{Text: "📝查看交易明细", URL: url},
-							},
-						},
-					},
-				})
-			}
-		}
-	}
-}
-
-func getAllWaitingOrders() map[string]model.TradeOrders {
+func getAllWaitingOrders() map[string][]model.Order {
 	var tradeOrders = model.GetOrderByStatus(model.OrderStatusWaiting)
-	var data = make(map[string]model.TradeOrders) // 当前所有正在等待支付的订单 Lock Key
-	for _, order := range tradeOrders {
-		if time.Now().Unix() >= order.ExpiredAt.Unix() { // 订单过期
-			order.SetExpired()
-			notify.Bepusdt(order)
-			model.PushWebhookEvent(model.WebhookEventOrderTimeout, order)
+	var data = make(map[string][]model.Order)
+	for _, t := range tradeOrders {
+		if time.Now().Unix() >= t.ExpiredAt.Unix() { // 订单过期
+			t.SetExpired()
+			notify.Bepusdt(t)
 
 			continue
 		}
 
-		if order.TradeType == model.OrderTradeTypeUsdtPolygon {
-
-			order.Address = strings.ToLower(order.Address)
-		}
-
-		data[order.Address+order.Amount+order.TradeType] = order
+		key := t.Address + string(t.TradeType)
+		data[key] = append(data[key], t)
 	}
 
 	return data
 }
 
-func getConfirmingOrders(tradeType []string) []model.TradeOrders {
-	var orders = make([]model.TradeOrders, 0)
-	var data = make([]model.TradeOrders, 0)
-	var db = model.DB.Where("status = ?", model.OrderStatusConfirming)
+func getConfirmingOrders(tradeType []model.TradeType) []model.Order {
+	var orders = make([]model.Order, 0)
+	var data = make([]model.Order, 0)
+	var db = model.Db.Where("status = ?", model.OrderStatusConfirming)
 	if len(tradeType) > 0 {
 		db = db.Where("trade_type in (?)", tradeType)
 	}
@@ -250,7 +261,6 @@ func getConfirmingOrders(tradeType []string) []model.TradeOrders {
 		if time.Now().Unix() >= order.ExpiredAt.Unix() {
 			order.SetFailed()
 			notify.Bepusdt(order)
-			model.PushWebhookEvent(model.WebhookEventOrderFailed, order)
 
 			continue
 		}
@@ -259,4 +269,41 @@ func getConfirmingOrders(tradeType []string) []model.TradeOrders {
 	}
 
 	return data
+}
+
+func amountMatch(amount decimal.Decimal, target, tradeType string) bool {
+	mode := model.GetC(model.PaymentMatchMode)
+	switch model.MatchMode(mode) {
+	case model.Classic:
+		return amount.String() == target
+	case model.HasPrefix:
+		return strings.HasPrefix(amount.String(), target)
+	case model.RoundOff:
+		t, err := decimal.NewFromString(target)
+		if err != nil {
+
+			return false
+		}
+
+		_, precision := model.GetAtomicity(model.TradeType(tradeType)) // 标准精度
+		precision2 := abs(t.Exponent())                                // 实际精度
+		if precision2 != precision {
+
+			precision = precision2
+		}
+
+		a := amount.Round(precision)
+		t = t.Round(precision)
+
+		return a.Equal(t)
+	}
+
+	return false
+}
+
+func abs(n int32) int32 {
+	if n < 0 {
+		return -n
+	}
+	return n
 }

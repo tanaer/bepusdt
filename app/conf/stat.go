@@ -3,12 +3,16 @@ package conf
 import (
 	"fmt"
 	"sync"
-	"sync/atomic"
 )
 
+const maxRecords = 1000
+
 type stat struct {
-	total atomic.Int64
-	fail  atomic.Int64
+	mu      sync.RWMutex
+	records []bool
+	index   int // 当前位置
+	total   int // 已记录总数
+	succ    int // 成功记录数
 }
 
 var (
@@ -16,28 +20,54 @@ var (
 )
 
 func getStat(net string) *stat {
-	val, _ := data.LoadOrStore(net, &stat{})
-
+	val, _ := data.LoadOrStore(net, &stat{
+		records: make([]bool, maxRecords),
+	})
 	return val.(*stat)
 }
 
-func SetBlockTotal(net string) {
-	getStat(net).total.Add(1)
-}
-
-func SetBlockFail(net string) {
-	getStat(net).fail.Add(1)
-}
-
-func GetBlockSuccRate(net string) string {
+func RecordSuccess(net string) {
 	s := getStat(net)
-	t := s.total.Load()
-	if t == 0 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
+	if s.total >= maxRecords && !s.records[s.index] {
+		s.succ++
+	} else if s.total < maxRecords {
+		s.succ++
+	}
+
+	s.records[s.index] = true
+	s.index = (s.index + 1) % maxRecords
+	if s.total < maxRecords {
+		s.total++
+	}
+}
+
+func RecordFailure(net string) {
+	s := getStat(net)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.total >= maxRecords && s.records[s.index] {
+		s.succ--
+	}
+
+	s.records[s.index] = false
+	s.index = (s.index + 1) % maxRecords
+	if s.total < maxRecords {
+		s.total++
+	}
+}
+
+func GetSuccessRate(net string) string {
+	s := getStat(net)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if s.total == 0 {
 		return "100.00%"
 	}
 
-	f := s.fail.Load()
-
-	return fmt.Sprintf("%.2f%%", float64(t-f)/float64(t)*100)
+	return fmt.Sprintf("%.2f%%", float64(s.succ)/float64(s.total)*100)
 }

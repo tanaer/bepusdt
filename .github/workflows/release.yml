@@ -11,15 +11,36 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
+          ref: 'main'
           fetch-depth: 0
+          fetch-tags: true
       - name: Git Fetch Tags
         run: git fetch --force --tags
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '25'
+      - name: Install pnpm
+        run: npm install -g pnpm
+      - name: Install frontend dependencies
+        working-directory: ./web
+        run: pnpm install --frozen-lockfile --shamefully-hoist
+      - name: Build frontend
+        working-directory: ./web
+        run: pnpm run build:prod
+      - name: Move frontend files to static/secure
+        run: |
+          mkdir -p static/secure
+          cp -r web/dist/* static/secure/
+      - name: Generate App Version
+        run: |
+          echo "VERSION_TAG=$(git describe --tags --abbrev=0)-$(git rev-parse --short=7 HEAD)" >> $GITHUB_ENV
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.24.3'
+          go-version: '1.25.4'
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v6
         with:
@@ -27,4 +48,5 @@ jobs:
           version: latest
           args: release --clean --verbose
         env:
+          VERSION: ${{ env.VERSION_TAG }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

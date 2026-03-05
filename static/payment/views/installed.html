@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BEpusdt - 安装完成</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #a8e6cf 0%, #56ab91 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 10px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.1);
+            max-width: 700px;
+            width: 100%;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #a8e6cf 0%, #56ab91 100%);
+            color: white;
+            padding: 15px 20px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 22px;
+            margin-bottom: 3px;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            font-weight: 600;
+        }
+
+        .header p {
+            opacity: 0.95;
+            font-size: 12px;
+        }
+
+        .content {
+            padding: 18px 22px;
+        }
+
+        .warning-banner {
+            background: #fff4e6;
+            border-left: 3px solid #ff9800;
+            padding: 10px 12px;
+            margin-bottom: 15px;
+            border-radius: 4px;
+        }
+
+        .warning-banner strong {
+            color: #e65100;
+            font-size: 13px;
+            display: block;
+            margin-bottom: 5px;
+        }
+
+        .warning-banner ul {
+            color: #e65100;
+            margin-left: 16px;
+            line-height: 1.4;
+            font-size: 12px;
+        }
+
+        .info-section {
+            background: #f0f9f4;
+            border-radius: 6px;
+            padding: 14px;
+            margin-bottom: 12px;
+            border: 1px solid #d1f2dd;
+        }
+
+        .info-section h3 {
+            color: #2d6a4f;
+            font-size: 15px;
+            margin-bottom: 10px;
+            padding-bottom: 6px;
+            border-bottom: 2px solid #a8e6cf;
+        }
+
+        .info-item {
+            display: flex;
+            align-items: center;
+            padding: 6px 8px;
+            margin-bottom: 6px;
+            background: white;
+            border-radius: 4px;
+            border: 1px solid #d1f2dd;
+        }
+
+        .info-item:last-child {
+            margin-bottom: 0;
+        }
+
+        .info-item .label {
+            font-weight: 600;
+            color: #2d6a4f;
+            min-width: 85px;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            font-size: 13px;
+        }
+
+        .info-item .value {
+            font-family: 'Courier New', monospace;
+            color: #40916c;
+            font-size: 14px;
+            font-weight: bold;
+            user-select: all;
+            flex: 1;
+        }
+
+        .copy-btn {
+            background: #52b788;
+            color: white;
+            border: none;
+            padding: 4px 9px;
+            border-radius: 3px;
+            cursor: pointer;
+            font-size: 11px;
+            margin-left: 6px;
+            transition: background 0.3s;
+        }
+
+        .copy-btn:hover {
+            background: #40916c;
+        }
+
+        .copy-btn.copied {
+            background: #4caf50;
+        }
+
+        .tips {
+            background: #e8f8f0;
+            border-left: 3px solid #74c69d;
+            padding: 10px 12px;
+            margin: 12px 0;
+            border-radius: 4px;
+        }
+
+        .tips h4 {
+            color: #2d6a4f;
+            margin-bottom: 5px;
+            font-size: 13px;
+        }
+
+        .tips ul {
+            color: #2d6a4f;
+            margin-left: 16px;
+            line-height: 1.5;
+            font-size: 12px;
+        }
+
+        .action-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 15px;
+            justify-content: center;
+        }
+
+        .btn {
+            padding: 10px 25px;
+            border: none;
+            border-radius: 5px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-decoration: none;
+            display: inline-block;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, #a8e6cf 0%, #56ab91 100%);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(86, 171, 145, 0.3);
+        }
+
+        .btn-secondary {
+            background: #74c69d;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background: #52b788;
+        }
+
+        .pulse {
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎉 欢迎使用 BEpusdt</h1>
+            <p>首次运行检测，初始配置完成</p>
+        </div>
+
+        <div class="content">
+            <div class="warning-banner pulse">
+                <strong>⚠️ 重要提示：当前页面仅展示一次！</strong>
+                <ul>
+                    <li>请立即将所有信息保存到安全位置</li>
+                    <li>关闭此页面后将无法再次查看</li>
+                    <li>建议截图或复制到密码管理器中保存</li>
+                </ul>
+            </div>
+
+            <div class="info-section">
+                <h3>🔐 后台登录信息</h3>
+                <div class="info-item">
+                    <div class="label">👤 登录账号：</div>
+                    <div class="value" id="username">{{ .username }}</div>
+                    <button class="copy-btn" onclick="copyText('username', this)">复制</button>
+                </div>
+                <div class="info-item">
+                    <div class="label">🔑 登录密码：</div>
+                    <div class="value" id="password">{{ .password }}</div>
+                    <button class="copy-btn" onclick="copyText('password', this)">复制</button>
+                </div>
+                <div class="info-item">
+                    <div class="label">🛡️ 安全入口：</div>
+                    <div class="value" id="secure">{{ .secure }}</div>
+                    <button class="copy-btn" onclick="copyText('secure', this)">复制</button>
+                </div>
+            </div>
+
+            <div class="info-section">
+                <h3>🔌 API 对接信息</h3>
+                <div class="info-item">
+                    <div class="label">🎫 对接令牌：</div>
+                    <div class="value" id="token">{{ .token }}</div>
+                    <button class="copy-btn" onclick="copyText('token', this)">复制</button>
+                </div>
+            </div>
+
+            <div class="tips">
+                <h4>💡 温馨提示</h4>
+                <ul>
+                    <li>登录密码遗忘可通过 bepusdt reset 命令重置</li>
+                    <li>API 令牌可在网页后台进行修改</li>
+                    <li>建议定期更换密码以确保账户安全</li>
+                    <li>请勿将登录信息分享给他人</li>
+                </ul>
+            </div>
+
+            <div class="action-buttons">
+                <button class="btn btn-secondary" onclick="copyAllInfo()">📋 复制全部信息</button>
+                <button class="btn btn-primary" onclick="confirmAndLogin()">🚀 进入后台管理</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function copyText(elementId, button) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(text).then(() => {
+                    const originalText = button.textContent;
+                    button.textContent = '✓ 已复制';
+                    button.classList.add('copied');
+
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.classList.remove('copied');
+                    }, 2000);
+                }).catch(err => {
+                    console.error('复制失败:', err);
+                    alert('复制失败，请手动复制');
+                });
+            } else {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = text;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '-999999px';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    const originalText = button.textContent;
+                    button.textContent = '✓ 已复制';
+                    button.classList.add('copied');
+
+                    setTimeout(() => {
+                        button.textContent = originalText;
+                        button.classList.remove('copied');
+                    }, 2000);
+                } catch (err) {
+                    console.error('Fallback复制失败:', err);
+                    alert('复制失败，请手动复制');
+                }
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function copyAllInfo() {
+            const username = document.getElementById('username').textContent;
+            const password = document.getElementById('password').textContent;
+            const secure = document.getElementById('secure').textContent;
+            const token = document.getElementById('token').textContent;
+
+            const allInfo = `
+═══════════════════════════════════════════
+    BEpusdt 系统初始化信息
+═══════════════════════════════════════════
+
+【后台登录信息】
+登录账号：${username}
+登录密码：${password}
+安全入口：${secure}
+
+【API 对接信息】
+对接令牌：${token}
+
+⚠️ 请妥善保管以上信息！
+═══════════════════════════════════════════
+            `.trim();
+
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(allInfo).then(() => {
+                    alert('✓ 所有信息已复制到剪贴板！');
+                }).catch(err => {
+                    console.error('复制失败:', err);
+                    alert('复制失败，请手动复制');
+                });
+            } else {
+                // Fallback for older browsers
+                const textArea = document.createElement('textarea');
+                textArea.value = allInfo;
+                textArea.style.position = 'fixed';
+                textArea.style.left = '-999999px';
+                textArea.style.top = '-999999px';
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+                try {
+                    document.execCommand('copy');
+                    alert('✓ 所有信息已复制到剪贴板！');
+                } catch (err) {
+                    console.error('Fallback复制失败:', err);
+                    alert('复制失败，请手动复制');
+                }
+                document.body.removeChild(textArea);
+            }
+        }
+
+        function confirmAndLogin() {
+            const confirmMsg = `⚠️ 重要提醒\n\n在跳转到后台之前，请确认您已经：\n\n✓ 保存了登录账号和密码\n✓ 记录了安全入口地址\n✓ 保存了 API 对接令牌\n\n关闭此页面后将无法再次查看这些信息！\n\n确认已保存所有信息？`;
+
+            if (confirm(confirmMsg)) {
+                const secure = document.getElementById('secure').textContent;
+                window.location.href = secure;
+            }
+        }
+
+        window.addEventListener('beforeunload', function (e) {
+            e.preventDefault();
+            e.returnValue = '您确定要离开吗？请确保已保存所有重要信息！';
+        });
+    </script>
+</body>
+
+</html>

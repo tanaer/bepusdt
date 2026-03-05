@@ -6,21 +6,21 @@ import (
 
 	"github.com/smallnest/chanx"
 	"github.com/v03413/bepusdt/app/conf"
+	"github.com/v03413/bepusdt/app/utils"
 )
 
 func arbitrumInit() {
 	ctx := context.Background()
 	arb := evm{
-		Network:  conf.Arbitrum,
-		Endpoint: conf.GetArbitrumRpcEndpoint(),
+		Network: conf.Arbitrum,
 		Block: block{
-			InitStartOffset: -600,
 			ConfirmedOffset: 40,
 		},
+		Client:         utils.NewHttpClient(),
 		blockScanQueue: chanx.NewUnboundedChan[evmBlock](ctx, 30),
 	}
 
-	register(task{callback: arb.blockDispatch})
-	register(task{callback: arb.blockRoll, duration: time.Second * 5})
-	register(task{callback: arb.tradeConfirmHandle, duration: time.Second * 5})
+	Register(Task{Callback: arb.blockDispatch})
+	Register(Task{Callback: arb.syncBlocksForward, Duration: time.Second * 5})
+	Register(Task{Callback: arb.tradeConfirmHandle, Duration: time.Second * 5})
 }

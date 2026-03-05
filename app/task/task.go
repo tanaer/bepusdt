@@ -5,23 +5,30 @@ import (
 	"sync"
 	"time"
 
-	"github.com/shopspring/decimal"
-	"github.com/v03413/bepusdt/app/conf"
+	"github.com/v03413/bepusdt/app/model"
 )
 
-type task struct {
-	duration time.Duration
-	callback func(ctx context.Context)
+// 区块扫描队列最大长度，避免可能因为 Rpc Rate Limit 问题导致消费队列堆积，进而导致OOM，暂时简单限制队列长度
+// 如果直接使用固定长度的 Channel 控制，会导致区块高度同步时也彻底阻塞，无法对外界输出日志导致无法观察，彻底垮掉
+// 如果确实是因为 Rate Limit 问题导致的异常，优先考虑的是提升 Rpc 节点的质量和稳定性
+const blockQueueLimit = 100
+
+type Task struct {
+	Duration time.Duration
+	Callback func(ctx context.Context)
 }
 
 var (
-	tasks []task
+	tasks []Task
 	mu    sync.Mutex
 )
 
 func Init() error {
+	model.RefreshC()
+
 	bscInit()
 	ethInit()
+	plasmaInit()
 	polygonInit()
 	arbitrumInit()
 	xlayerInit()
@@ -30,30 +37,16 @@ func Init() error {
 	return nil
 }
 
-func register(t task) {
+func Register(t Task) {
 	mu.Lock()
 	defer mu.Unlock()
 
-	if t.callback == nil {
+	if t.Callback == nil {
 
-		panic("task callback cannot be nil")
+		panic("Task Callback cannot be nil")
 	}
 
 	tasks = append(tasks, t)
-}
-
-func inAmountRange(payAmount decimal.Decimal) bool {
-	if payAmount.GreaterThan(conf.GetPaymentAmountMax()) {
-
-		return false
-	}
-
-	if payAmount.LessThan(conf.GetPaymentAmountMin()) {
-
-		return false
-	}
-
-	return true
 }
 
 func Start(ctx context.Context) {
@@ -61,16 +54,16 @@ func Start(ctx context.Context) {
 	defer mu.Unlock()
 
 	for _, t := range tasks {
-		go func(t task) {
-			if t.duration <= 0 {
-				t.callback(ctx)
+		go func(t Task) {
+			if t.Duration <= 0 {
+				t.Callback(ctx)
 
 				return
 			}
 
-			t.callback(ctx)
+			t.Callback(ctx)
 
-			ticker := time.NewTicker(t.duration)
+			ticker := time.NewTicker(t.Duration)
 			defer ticker.Stop()
 
 			for {
@@ -78,7 +71,7 @@ func Start(ctx context.Context) {
 				case <-ctx.Done():
 					return
 				case <-ticker.C:
-					t.callback(ctx)
+					t.Callback(ctx)
 				}
 			}
 		}(t)

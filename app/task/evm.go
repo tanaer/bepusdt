@@ -8,7 +8,6 @@ import (
 	"io"
 	"math/big"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -16,11 +15,12 @@ import (
 	"github.com/panjf2000/ants/v2"
 	"github.com/shopspring/decimal"
 	"github.com/smallnest/chanx"
+	"github.com/spf13/cast"
 	"github.com/tidwall/gjson"
 	"github.com/v03413/bepusdt/app/conf"
-	"github.com/v03413/bepusdt/app/help"
 	"github.com/v03413/bepusdt/app/log"
 	"github.com/v03413/bepusdt/app/model"
+	"github.com/v03413/bepusdt/app/utils"
 )
 
 const (
@@ -29,56 +29,24 @@ const (
 )
 
 var chainBlockNum sync.Map
-var contractMap = map[string]string{
-	conf.UsdtXlayer:   model.OrderTradeTypeUsdtXlayer,
-	conf.UsdtBep20:    model.OrderTradeTypeUsdtBep20,
-	conf.UsdtPolygon:  model.OrderTradeTypeUsdtPolygon,
-	conf.UsdtArbitrum: model.OrderTradeTypeUsdtArbitrum,
-	conf.UsdtErc20:    model.OrderTradeTypeUsdtErc20,
-	conf.UsdcErc20:    model.OrderTradeTypeUsdcErc20,
-	conf.UsdcPolygon:  model.OrderTradeTypeUsdcPolygon,
-	conf.UsdcXlayer:   model.OrderTradeTypeUsdcXlayer,
-	conf.UsdcArbitrum: model.OrderTradeTypeUsdcArbitrum,
-	conf.UsdcBep20:    model.OrderTradeTypeUsdcBep20,
-	conf.UsdcBase:     model.OrderTradeTypeUsdcBase,
-}
-var networkTokenMap = map[string][]string{
-	conf.Bsc:      {model.OrderTradeTypeUsdtBep20, model.OrderTradeTypeUsdcBep20},
-	conf.Xlayer:   {model.OrderTradeTypeUsdtXlayer, model.OrderTradeTypeUsdcXlayer},
-	conf.Polygon:  {model.OrderTradeTypeUsdtPolygon, model.OrderTradeTypeUsdcPolygon},
-	conf.Arbitrum: {model.OrderTradeTypeUsdtArbitrum, model.OrderTradeTypeUsdcArbitrum},
-	conf.Ethereum: {model.OrderTradeTypeUsdtErc20, model.OrderTradeTypeUsdcErc20},
-	conf.Base:     {model.OrderTradeTypeUsdcBase},
-	conf.Solana:   {model.OrderTradeTypeUsdtSolana, model.OrderTradeTypeUsdcSolana},
-	conf.Aptos:    {model.OrderTradeTypeUsdtAptos, model.OrderTradeTypeUsdcAptos},
-}
-var client = &http.Client{Timeout: time.Second * 30}
-var decimals = map[string]int32{
-	conf.UsdtXlayer:   conf.UsdtXlayerDecimals,
-	conf.UsdtBep20:    conf.UsdtBscDecimals,
-	conf.UsdtPolygon:  conf.UsdtPolygonDecimals,
-	conf.UsdtArbitrum: conf.UsdtArbitrumDecimals,
-	conf.UsdtErc20:    conf.UsdtEthDecimals,
-	conf.UsdcErc20:    conf.UsdcEthDecimals,
-	conf.UsdcPolygon:  conf.UsdcPolygonDecimals,
-	conf.UsdcXlayer:   conf.UsdcXlayerDecimals,
-	conf.UsdcArbitrum: conf.UsdcArbitrumDecimals,
-	conf.UsdcBep20:    conf.UsdcBscDecimals,
-	conf.UsdcBase:     conf.UsdcBaseDecimals,
-	conf.UsdcAptos:    conf.UsdcAptosDecimals,
-	conf.UsdtAptos:    conf.UsdtAptosDecimals,
-}
 
 type block struct {
-	InitStartOffset int64 // 首次偏移量，第一次启动时，区块高度需要叠加此值，设置为负值可解决部分已创建但未超时(未扫描)的订单问题
 	RollDelayOffset int64 // 延迟偏移量，某些RPC节点如果不延迟，会报错 block is out of range，目前发现 https://rpc.xlayer.tech/ 存在此问题
-	ConfirmedOffset int64 // 确认偏移量，开启交易确认后，区块高度需要减去此值认为交易已确认
+	ConfirmedOffset int   // 确认偏移量，开启交易确认后，区块高度需要减去此值认为交易已确认
+}
+
+type evmNative struct {
+	Parse     bool
+	Decimal   int32
+	TradeType model.TradeType
 }
 
 type evm struct {
 	Network        string
-	Endpoint       string
 	Block          block
+	Native         evmNative
+	Client         *http.Client
+	AvgBlockTime   int64 // 平均出块时间，单位秒；一个大概值，用于计算首次启动时需要回溯的区块数量，尽量准确设置，默认1秒一个区块
 	blockScanQueue *chanx.UnboundedChan[evmBlock]
 }
 
@@ -87,28 +55,24 @@ type evmBlock struct {
 	To   int64
 }
 
-func init() {
-	//register(task{callback: evmBlockDispatch})
-}
-
-func (e *evm) blockRoll(ctx context.Context) {
-	if rollBreak(e.Network) {
+func (e *evm) syncBlocksForward(ctx context.Context) {
+	if syncBreak(e.Network, e.blockScanQueue.Len()) {
 
 		return
 	}
 
 	post := []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)
-	req, err := http.NewRequestWithContext(ctx, "POST", e.Endpoint, bytes.NewBuffer(post))
+	req, err := http.NewRequestWithContext(ctx, "POST", e.rpcEndpoint(), bytes.NewBuffer(post))
 	if err != nil {
-		log.Warn("Error creating request:", err)
+		log.Task.Warn("Error creating request:", err)
 
 		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
+	resp, err := e.Client.Do(req)
 	if err != nil {
-		log.Warn("Error sending request:", err)
+		log.Task.Warn("Error sending request:", err)
 
 		return
 	}
@@ -117,31 +81,35 @@ func (e *evm) blockRoll(ctx context.Context) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		log.Warn("Error reading response body:", err)
+		log.Task.Warn("Error reading response body:", err)
 
 		return
 	}
 
 	var res = gjson.ParseBytes(body)
-	var now = help.HexStr2Int(res.Get("result").String()).Int64() - e.Block.RollDelayOffset
-	if now <= 0 {
+	if !res.IsObject() {
+		log.Task.Warn(fmt.Sprintf("EVM 数据解析错误(%s): %s", e.Network, string(body)))
 
 		return
 	}
 
-	if conf.GetTradeIsConfirmed() {
+	var now = utils.HexStr2Int(res.Get("result").String()).Int64() - e.Block.RollDelayOffset
+	if now <= 0 {
 
-		now = now - e.Block.ConfirmedOffset
+		return
 	}
 
 	var lastBlockNumber int64
 	if v, ok := chainBlockNum.Load(e.Network); ok {
 
 		lastBlockNumber = v.(int64)
+	} else {
+		e.syncBlocksBackward(now) // 不存在，说明是第一次启动
 	}
 
-	if now-lastBlockNumber > conf.BlockHeightMaxDiff {
-		lastBlockNumber = e.blockInitOffset(now, e.Block.InitStartOffset) - 1
+	if now-lastBlockNumber > cast.ToInt64(model.GetC(model.BlockHeightMaxDiff)) {
+
+		lastBlockNumber = now - 1
 	}
 
 	chainBlockNum.Store(e.Network, now)
@@ -160,30 +128,48 @@ func (e *evm) blockRoll(ctx context.Context) {
 	}
 }
 
-func (e *evm) blockInitOffset(now, offset int64) int64 {
+func (e *evm) syncBlocksBackward(now int64) {
+	if e.AvgBlockTime <= 0 { // 未设置平均出块时间，默认1秒一个
+		e.AvgBlockTime = 1
+	}
+
+	var o model.Order
+	trade := model.GetNetworkTrades(model.Network(e.Network))
+	model.Db.Model(&model.Order{}).Where("status = ? and trade_type in (?)", model.OrderStatusWaiting, trade).Order("created_at asc").Limit(1).Find(&o)
+	if o.ID == 0 {
+
+		return
+	}
+
+	sub := ((time.Now().Unix() - o.CreatedAt.Time().Unix()) / e.AvgBlockTime) + 30 //计算需要回溯的区块数量，同时冗余30个区块
+	start := now - sub
+
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 
-		for b := now; b > now+offset; b -= blockParseMaxNum {
-			if rollBreak(e.Network) {
+		for from := start; from <= now; from += blockParseMaxNum {
+			if syncBreak(e.Network, e.blockScanQueue.Len()) {
 
 				return
 			}
 
-			e.blockScanQueue.In <- evmBlock{From: b - blockParseMaxNum + 1, To: b}
+			to := from + blockParseMaxNum - 1
+			if to > now {
+				to = now
+			}
+
+			e.blockScanQueue.In <- evmBlock{From: from, To: to}
 
 			<-ticker.C
 		}
 	}()
-
-	return now
 }
 
 func (e *evm) blockDispatch(ctx context.Context) {
-	p, err := ants.NewPoolWithFunc(2, e.getBlockByNumber)
+	p, err := ants.NewPoolWithFunc(3, e.getBlockByNumber)
 	if err != nil {
-		panic(err)
+		log.Task.Warn("Error creating pool:", err)
 
 		return
 	}
@@ -198,7 +184,7 @@ func (e *evm) blockDispatch(ctx context.Context) {
 			if err := p.Invoke(n); err != nil {
 				e.blockScanQueue.In <- n
 
-				log.Warn("evmBlockDispatch Error invoking process block:", err)
+				log.Task.Warn("Evm Block Dispatch Error invoking process block:", err)
 			}
 		}
 	}
@@ -207,32 +193,32 @@ func (e *evm) blockDispatch(ctx context.Context) {
 func (e *evm) getBlockByNumber(a any) {
 	b, ok := a.(evmBlock)
 	if !ok {
-		log.Warn("evmBlockParse Error: expected []int64, got", a)
+		log.Task.Warn("Evm Block Parse Error: expected []int64, got", a)
 
 		return
 	}
 
 	items := make([]string, 0)
 	for i := b.From; i <= b.To; i++ {
-		items = append(items, fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x%x",false],"id":%d}`, i, i))
+		items = append(items, fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["0x%x",%t],"id":%d}`, i, e.Native.Parse, i))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "POST", e.Endpoint, bytes.NewBuffer([]byte(fmt.Sprintf(`[%s]`, strings.Join(items, ",")))))
+	req, err := http.NewRequestWithContext(ctx, "POST", e.rpcEndpoint(), bytes.NewBuffer([]byte(fmt.Sprintf(`[%s]`, strings.Join(items, ",")))))
 	if err != nil {
-		log.Warn("Error creating request:", err)
+		log.Task.Warn("Error creating request:", err)
 
 		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
+	resp, err := e.Client.Do(req)
 	if err != nil {
-		conf.SetBlockFail(e.Network)
+		conf.RecordFailure(e.Network)
 		e.blockScanQueue.In <- b
-		log.Warn("eth_getBlockByNumber Error sending request:", err)
+		log.Task.Warn("eth_getBlockByNumber Error sending request:", err)
 
 		return
 	}
@@ -241,47 +227,104 @@ func (e *evm) getBlockByNumber(a any) {
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		conf.SetBlockFail(e.Network)
+		conf.RecordFailure(e.Network)
 		e.blockScanQueue.In <- b
-		log.Warn("eth_getBlockByNumber Error reading response body:", err)
+		log.Task.Warn("eth_getBlockByNumber Error reading response body:", err)
 
 		return
 	}
 
-	timestamp := make(map[string]time.Time)
+	conf.RecordSuccess(e.Network)
+
+	nativeTransfers := make([]transfer, 0)
+	blockTimestamp := make(map[string]time.Time)
 	for _, itm := range gjson.ParseBytes(body).Array() {
 		if itm.Get("error").Exists() {
-			conf.SetBlockFail(e.Network)
+			conf.RecordFailure(e.Network)
 			e.blockScanQueue.In <- b
-			log.Warn(fmt.Sprintf("%s eth_getBlockByNumber response error %s", e.Network, itm.Get("error").String()))
+			log.Task.Warn(fmt.Sprintf("%s eth_getBlockByNumber response error %s", e.Network, itm.Get("error").String()))
 
 			return
 		}
 
-		timestamp[itm.Get("result.number").String()] = time.Unix(help.HexStr2Int(itm.Get("result.timestamp").String()).Int64(), 0)
+		timestamp := utils.HexStr2Int(itm.Get("result.timestamp").String()).Int64()
+		blockTime := time.Unix(timestamp, 0)
+		blockNumHex := itm.Get("result.number").String()
+		blockTimestamp[blockNumHex] = blockTime
+
+		var array = itm.Get("result.transactions").Array()
+		if e.Native.Parse && len(array) != 0 {
+
+			nativeTransfers = append(nativeTransfers, e.parseNativeTransfer(array, int(utils.HexStr2Int(blockNumHex).Int64()), blockTime)...)
+		}
 	}
 
-	transfers, err := e.parseBlockTransfer(b, timestamp)
+	transfers, err := e.parseEventTransfer(b, blockTimestamp)
 	if err != nil {
-		conf.SetBlockFail(e.Network)
+		conf.RecordFailure(e.Network)
 		e.blockScanQueue.In <- b
-		log.Warn("evmBlockParse Error parsing block transfer:", err)
+		log.Task.Warn("Evm Block Parse Error parsing block transfer:", err)
 
 		return
 	}
 
-	if len(transfers) >= 0 {
-
+	if len(nativeTransfers) > 0 {
+		transferQueue.In <- nativeTransfers
+	}
+	if len(transfers) > 0 {
 		transferQueue.In <- transfers
 	}
 
-	log.Info("区块扫描完成", b, conf.GetBlockSuccRate(e.Network), e.Network)
+	log.Task.Info(fmt.Sprintf("区块扫描完成(%s): %d → %d 成功率：%s", e.Network, b.From, b.To, conf.GetSuccessRate(e.Network)))
 }
 
-func (e *evm) parseBlockTransfer(b evmBlock, timestamp map[string]time.Time) ([]transfer, error) {
+func (e *evm) parseNativeTransfer(array []gjson.Result, num int, timestamp time.Time) []transfer {
+	nativeTransfers := make([]transfer, 0)
+	for _, tx := range array {
+		if tx.Get("input").String() != "0x" {
+			// 非原生币交易
+
+			continue
+		}
+
+		valStr := tx.Get("value").String()
+		if valStr == "0x0" || len(valStr) < 3 {
+			// 过滤 0 值交易
+
+			continue
+		}
+
+		amount, ok := big.NewInt(0).SetString(valStr[2:], 16)
+		if !ok || amount.Sign() <= 0 {
+
+			continue
+		}
+
+		toAddress := tx.Get("to").String()
+		if toAddress == "" { // 合约创建交易 to 为空
+
+			continue
+		}
+
+		nativeTransfers = append(nativeTransfers, transfer{
+			Network:     e.Network,
+			FromAddress: tx.Get("from").String(),
+			RecvAddress: toAddress,
+			Amount:      decimal.NewFromBigInt(amount, e.Native.Decimal),
+			TxHash:      tx.Get("hash").String(),
+			BlockNum:    num,
+			Timestamp:   timestamp,
+			TradeType:   e.Native.TradeType,
+		})
+	}
+
+	return nativeTransfers
+}
+
+func (e *evm) parseEventTransfer(b evmBlock, timestamp map[string]time.Time) ([]transfer, error) {
 	transfers := make([]transfer, 0)
 	post := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getLogs","params":[{"fromBlock":"0x%x","toBlock":"0x%x","topics":["%s"]}],"id":1}`, b.From, b.To, evmTransferEvent))
-	resp, err := client.Post(e.Endpoint, "application/json", bytes.NewBuffer(post))
+	resp, err := e.Client.Post(e.rpcEndpoint(), "application/json", bytes.NewBuffer(post))
 	if err != nil {
 
 		return transfers, errors.Join(errors.New("eth_getLogs Post Error"), err)
@@ -303,7 +346,7 @@ func (e *evm) parseBlockTransfer(b evmBlock, timestamp map[string]time.Time) ([]
 
 	for _, itm := range data.Get("result").Array() {
 		to := itm.Get("address").String()
-		tradeType, ok := contractMap[to]
+		tradeType, ok := model.GetContractTrade(to)
 		if !ok {
 
 			continue
@@ -328,20 +371,13 @@ func (e *evm) parseBlockTransfer(b evmBlock, timestamp map[string]time.Time) ([]
 			continue
 		}
 
-		blockNum, err := strconv.ParseInt(itm.Get("blockNumber").String(), 0, 64)
-		if err != nil {
-			log.Warn("evmBlockParse Error parsing block number:", err)
-
-			continue
-		}
-
 		transfers = append(transfers, transfer{
 			Network:     e.Network,
 			FromAddress: from,
 			RecvAddress: recv,
-			Amount:      decimal.NewFromBigInt(amount, decimals[to]),
+			Amount:      decimal.NewFromBigInt(amount, model.GetContractDecimal(to)),
 			TxHash:      itm.Get("transactionHash").String(),
-			BlockNum:    blockNum,
+			BlockNum:    cast.ToInt(itm.Get("blockNumber").String()),
 			Timestamp:   timestamp[itm.Get("blockNumber").String()],
 			TradeType:   tradeType,
 		})
@@ -351,22 +387,32 @@ func (e *evm) parseBlockTransfer(b evmBlock, timestamp map[string]time.Time) ([]
 }
 
 func (e *evm) tradeConfirmHandle(ctx context.Context) {
-	var orders = getConfirmingOrders(networkTokenMap[e.Network])
+	var orders = getConfirmingOrders(model.GetNetworkTrades(model.Network(e.Network)))
 	var wg sync.WaitGroup
 
-	var handle = func(o model.TradeOrders) {
-		post := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["%s"],"id":1}`, o.TradeHash))
-		req, err := http.NewRequestWithContext(ctx, "POST", e.Endpoint, bytes.NewBuffer(post))
+	var handle = func(o model.Order) {
+		if model.GetC(model.BlockOffsetConfirm) == "1" {
+			last, ok := chainBlockNum.Load(e.Network)
+			if !ok {
+				return
+			}
+			if last.(int)-o.RefBlockNum < e.Block.ConfirmedOffset {
+				return
+			}
+		}
+
+		post := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","method":"eth_getTransactionReceipt","params":["%s"],"id":1}`, o.RefHash))
+		req, err := http.NewRequestWithContext(ctx, "POST", e.rpcEndpoint(), bytes.NewBuffer(post))
 		if err != nil {
-			log.Warn("evm tradeConfirmHandle Error creating request:", err)
+			log.Task.Warn("evm tradeConfirmHandle Error creating request:", err)
 
 			return
 		}
 
 		req.Header.Set("Content-Type", "application/json")
-		resp, err := client.Do(req)
+		resp, err := e.Client.Do(req)
 		if err != nil {
-			log.Warn("evm tradeConfirmHandle Error sending request:", err)
+			log.Task.Warn("evm tradeConfirmHandle Error sending request:", err)
 
 			return
 		}
@@ -375,14 +421,14 @@ func (e *evm) tradeConfirmHandle(ctx context.Context) {
 
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Warn("evm tradeConfirmHandle Error reading response body:", err)
+			log.Task.Warn("evm tradeConfirmHandle Error reading response body:", err)
 
 			return
 		}
 
 		data := gjson.ParseBytes(body)
 		if data.Get("error").Exists() {
-			log.Warn(fmt.Sprintf("%s eth_getTransactionReceipt response error %s", e.Network, data.Get("error").String()))
+			log.Task.Warn(fmt.Sprintf("%s eth_getTransactionReceipt response error %s", e.Network, data.Get("error").String()))
 
 			return
 		}
@@ -403,25 +449,36 @@ func (e *evm) tradeConfirmHandle(ctx context.Context) {
 	wg.Wait()
 }
 
-func rollBreak(network string) bool {
-	token, ok := networkTokenMap[network]
-	if !ok {
+func (e *evm) rpcEndpoint() string {
+
+	return model.Endpoint(model.Network(e.Network))
+}
+
+func syncBreak(network string, num int) bool {
+	if num >= blockQueueLimit {
+		log.Task.Warn(fmt.Sprintf("%s 同步阻塞，当前区块消费堆积数量：%d", network, num))
 
 		return true
 	}
 
-	var count int64 = 0
-	model.DB.Model(&model.TradeOrders{}).Where("status = ? and trade_type in (?)", model.OrderStatusWaiting, token).Count(&count)
+	trades := model.GetNetworkTrades(model.Network(network))
+	if len(trades) == 0 {
+
+		return true
+	}
+
+	var count int64
+	model.Db.Model(&model.Wallet{}).
+		Where("other_notify = ? and trade_type in (?)", model.WaOtherEnable, trades).
+		Count(&count)
 	if count > 0 {
 
 		return false
 	}
 
-	model.DB.Model(&model.WalletAddress{}).Where("other_notify = ? and trade_type in (?)", model.OtherNotifyEnable, token).Count(&count)
-	if count > 0 {
+	model.Db.Model(&model.Order{}).
+		Where("status = ? and trade_type in (?)", model.OrderStatusWaiting, trades).
+		Count(&count)
 
-		return false
-	}
-
-	return true
+	return count == 0
 }
