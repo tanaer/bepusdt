@@ -4,8 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"sync"
@@ -65,27 +65,22 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 		return
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, "POST", model.Endpoint(conf.Solana), bytes.NewBuffer([]byte(`{"jsonrpc":"2.0","id":1,"method":"getSlot"}`)))
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := s.client.Do(req)
+	body, _, err := doRPCRequestWithFailover(ctx, s.client, conf.Solana, func(endpoint string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer([]byte(`{"jsonrpc":"2.0","id":1,"method":"getSlot"}`)))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(body []byte) error {
+		data := gjson.ParseBytes(body)
+		if data.Get("error").Exists() {
+			return fmt.Errorf("%s", data.Get("error").String())
+		}
+		return nil
+	})
 	if err != nil {
-		log.Task.Warn("syncSlotForward Error sending request:", err)
-
-		return
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		log.Task.Warn("syncSlotForward Error response status code:", resp.StatusCode)
-
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Task.Warn("syncSlotForward Error reading response body:", err)
+		log.Task.Warn("syncSlotForward Error:", err)
 
 		return
 	}
@@ -96,6 +91,7 @@ func (s *solana) syncSlotForward(ctx context.Context) {
 
 		return
 	}
+	model.SetChainProgress(conf.Solana, now)
 
 	if now-s.lastSlotNum > cast.ToInt(model.GetC(model.BlockHeightMaxDiff)) { // 区块高度变化过大，强制丢块重扫
 		s.lastSlotNum = now
@@ -147,28 +143,27 @@ func (s *solana) slotParse(n any) {
 	post := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"getBlock","params":[%d,{"encoding":"json","maxSupportedTransactionVersion":0,"transactionDetails":"full","rewards":false}]}`, slot))
 	network := conf.Solana
 
-	conf.RecordSuccess(network, cast.ToString(slot))
-	resp, err := s.client.Post(model.Endpoint(conf.Solana), "application/json", bytes.NewBuffer(post))
+	body, _, err := doRPCRequestWithFailover(context.Background(), s.client, network, func(endpoint string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(context.Background(), "POST", endpoint, bytes.NewBuffer(post))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(body []byte) error {
+		data := gjson.ParseBytes(body)
+		if data.Get("error").Exists() {
+			return fmt.Errorf("%s", data.Get("error").String())
+		}
+		result := data.Get("result")
+		if !result.Exists() || result.Raw == "null" {
+			return fmt.Errorf("slot %d block is temporarily unavailable", slot)
+		}
+		return nil
+	})
 	if err != nil {
-		conf.RecordFailure(network)
-		log.Task.Warn("slotParse Error sending request:", err)
-
-		return
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		conf.RecordFailure(network)
-		log.Task.Warn("slotParse Error response status code:", resp.StatusCode)
-
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		conf.RecordFailure(network)
 		s.slotQueue.In <- slot
-		log.Task.Warn("slotParse Error reading response body:", err)
+		log.Task.Warn("slotParse Error:", err)
 
 		return
 	}
@@ -335,36 +330,27 @@ func (s *solana) tradeConfirmHandle(ctx context.Context) {
 		}
 
 		post := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"getSignatureStatuses","params":[["%s"],{"searchTransactionHistory":true}]}`, o.RefHash))
-		req, _ := http.NewRequestWithContext(ctx, "POST", model.Endpoint(conf.Solana), bytes.NewBuffer(post))
-		resp, err := s.client.Do(req)
+		body, _, err := doRPCRequestWithFailover(ctx, s.client, conf.Solana, func(endpoint string) (*http.Request, error) {
+			req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(post))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			return req, nil
+		}, func(body []byte) error {
+			data := gjson.ParseBytes(body)
+			if data.Get("error").Exists() {
+				return fmt.Errorf("%s", data.Get("error").String())
+			}
+			return nil
+		})
 		if err != nil {
-			log.Task.Warn("solana tradeConfirmHandle Error sending request:", err)
-
-			return
-		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			log.Task.Warn("solana tradeConfirmHandle Error response status code:", resp.StatusCode)
-
-			return
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Task.Warn("solana tradeConfirmHandle Error reading response body:", err)
+			log.Task.Warn("solana tradeConfirmHandle Error:", err)
 
 			return
 		}
 
 		data := gjson.ParseBytes(body)
-		if data.Get("error").Exists() {
-			log.Task.Warn("solana tradeConfirmHandle Error:", data.Get("error").String())
-
-			return
-		}
-
 		if data.Get("result.value.0.confirmationStatus").String() == "finalized" {
 
 			markFinalConfirmed(o)
@@ -388,6 +374,8 @@ func (s *solana) lookbackSlots(ctx context.Context) {
 		return
 	}
 
+	s.reconcileWaitingOrders(ctx)
+
 	startAt, endAt, ok := getLookbackUnix(conf.Solana)
 	if !ok {
 		return
@@ -406,4 +394,261 @@ func (s *solana) lookbackSlots(ctx context.Context) {
 		s.slotQueue.In <- i
 		time.Sleep(time.Millisecond * 200)
 	}
+}
+
+func (s *solana) reconcileWaitingOrders(ctx context.Context) {
+	trades := model.GetNetworkTrades(conf.Solana)
+	if len(trades) == 0 {
+		return
+	}
+
+	orders := make([]model.Order, 0)
+	model.Db.Where("status in (?) and trade_type in (?)", receivableOrderStatuses(), trades).
+		Where("expired_at > ?", time.Now().Add(model.GetLookbackHour())).
+		Order("created_at asc").
+		Find(&orders)
+	if len(orders) == 0 {
+		return
+	}
+
+	tokenAccounts := make(map[string][]string)
+	for _, order := range orders {
+		if ctx.Err() != nil {
+			return
+		}
+
+		address := orderMatchAddress(order)
+		key := fmt.Sprintf("%s%s", address, order.TradeType)
+		accounts, ok := tokenAccounts[key]
+		if !ok {
+			var err error
+			accounts, err = s.getTokenAccountsByOwner(ctx, address, order.TradeType)
+			if err != nil {
+				log.Task.Warn("solana reconcile getTokenAccountsByOwner Error:", err)
+				continue
+			}
+			tokenAccounts[key] = accounts
+		}
+
+		for _, account := range accounts {
+			if s.reconcileOrderTokenAccount(ctx, order, account) {
+				break
+			}
+		}
+	}
+}
+
+func (s *solana) getTokenAccountsByOwner(ctx context.Context, owner string, tradeType model.TradeType) ([]string, error) {
+	contract := ""
+	if c, ok := model.GetAllTradeConfig()[string(tradeType)]; ok {
+		contract = c.Contract
+	}
+	if contract == "" {
+		return nil, nil
+	}
+
+	result, err := s.rpc(ctx, "getTokenAccountsByOwner", []any{
+		owner,
+		map[string]any{"mint": contract},
+		map[string]any{"encoding": "jsonParsed"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	accounts := make([]string, 0)
+	for _, item := range result.Get("value").Array() {
+		pubkey := item.Get("pubkey").String()
+		if pubkey != "" {
+			accounts = append(accounts, pubkey)
+		}
+	}
+
+	return accounts, nil
+}
+
+func (s *solana) reconcileOrderTokenAccount(ctx context.Context, order model.Order, account string) bool {
+	result, err := s.rpc(ctx, "getSignaturesForAddress", []any{
+		account,
+		map[string]any{"limit": 50},
+	})
+	if err != nil {
+		log.Task.Warn("solana reconcile getSignaturesForAddress Error:", err)
+		return false
+	}
+
+	for _, sig := range result.Array() {
+		if sig.Get("err").Exists() && sig.Get("err").Raw != "null" {
+			continue
+		}
+
+		blockTime := sig.Get("blockTime").Int()
+		if blockTime > 0 {
+			ts := time.Unix(blockTime, 0)
+			if !order.CreatedAt.Before(ts) || !order.ExpiredAt.After(ts) {
+				continue
+			}
+		}
+
+		hash := sig.Get("signature").String()
+		if hash == "" {
+			continue
+		}
+
+		result, err := s.rpc(ctx, "getTransaction", []any{
+			hash,
+			map[string]any{"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+		})
+		if err != nil {
+			log.Task.Warn("solana reconcile getTransaction Error:", err)
+			continue
+		}
+		if result.Get("meta.err").Exists() && result.Get("meta.err").Raw != "null" {
+			continue
+		}
+
+		for _, t := range parseSolanaParsedTransfers(result) {
+			t.TxHash = hash
+			if t.BlockNum == 0 {
+				t.BlockNum = int(result.Get("slot").Int())
+			}
+			if t.Timestamp.IsZero() {
+				t.Timestamp = time.Unix(result.Get("blockTime").Int(), 0)
+			}
+			if !orderTransferMatch(order, t) {
+				continue
+			}
+
+			if err := order.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp, t.Amount); err != nil {
+				log.Task.Warn("solana reconcile mark order confirming failed:", err)
+				return false
+			}
+
+			log.Task.Info(fmt.Sprintf("Solana 订单回查确认成功：%s %s", order.TradeId, t.TxHash))
+			return true
+		}
+	}
+
+	return false
+}
+
+func (s *solana) rpc(ctx context.Context, method string, params any) (gjson.Result, error) {
+	post, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      1,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return gjson.Result{}, err
+	}
+
+	body, _, err := doRPCRequestWithFailover(ctx, s.client, conf.Solana, func(endpoint string) (*http.Request, error) {
+		req, err := http.NewRequestWithContext(ctx, "POST", endpoint, bytes.NewBuffer(post))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		return req, nil
+	}, func(body []byte) error {
+		data := gjson.ParseBytes(body)
+		if data.Get("error").Exists() {
+			return fmt.Errorf("%s", data.Get("error").String())
+		}
+		return nil
+	})
+	if err != nil {
+		return gjson.Result{}, err
+	}
+
+	data := gjson.ParseBytes(body)
+
+	return data.Get("result"), nil
+}
+
+func parseSolanaParsedTransfers(tx gjson.Result) []transfer {
+	tokenAccountMap := make(map[string]solanaTokenOwner)
+	for _, v := range []string{"postTokenBalances", "preTokenBalances"} {
+		for _, item := range tx.Get("meta." + v).Array() {
+			tradeType, ok := model.GetContractTrade(item.Get("mint").String())
+			if !ok || item.Get("programId").String() != conf.SolSplToken {
+				continue
+			}
+
+			tokenAccountMap[item.Get("accountIndex").String()] = solanaTokenOwner{
+				TradeType: tradeType,
+				Address:   item.Get("owner").String(),
+			}
+		}
+	}
+
+	transfers := make([]transfer, 0)
+	instructions := tx.Get("transaction.message.instructions").Array()
+	for _, inner := range tx.Get("meta.innerInstructions").Array() {
+		instructions = append(instructions, inner.Get("instructions").Array()...)
+	}
+
+	for _, instr := range instructions {
+		if instr.Get("programId").String() != conf.SolSplToken {
+			continue
+		}
+
+		parsed := instr.Get("parsed")
+		if !parsed.Exists() {
+			continue
+		}
+
+		typ := parsed.Get("type").String()
+		if typ != "transfer" && typ != "transferChecked" {
+			continue
+		}
+
+		info := parsed.Get("info")
+		source := info.Get("source").String()
+		destination := info.Get("destination").String()
+		from, ok := tokenAccountOwnerByPubkey(tx, tokenAccountMap, source)
+		if !ok {
+			continue
+		}
+		to, ok := tokenAccountOwnerByPubkey(tx, tokenAccountMap, destination)
+		if !ok {
+			continue
+		}
+
+		amountRaw := info.Get("tokenAmount.amount").String()
+		decimals := info.Get("tokenAmount.decimals").Int()
+		if amountRaw == "" {
+			amountRaw = info.Get("amount").String()
+			decimals = 6
+		}
+
+		amountInt, ok := new(big.Int).SetString(amountRaw, 10)
+		if !ok {
+			continue
+		}
+
+		transfers = append(transfers, transfer{
+			Network:     conf.Solana,
+			Amount:      decimal.NewFromBigInt(amountInt, -int32(decimals)),
+			FromAddress: from.Address,
+			RecvAddress: to.Address,
+			Timestamp:   time.Unix(tx.Get("blockTime").Int(), 0),
+			TradeType:   from.TradeType,
+			BlockNum:    int(tx.Get("slot").Int()),
+		})
+	}
+
+	return transfers
+}
+
+func tokenAccountOwnerByPubkey(tx gjson.Result, tokenAccountMap map[string]solanaTokenOwner, pubkey string) (solanaTokenOwner, bool) {
+	accountKeys := tx.Get("transaction.message.accountKeys").Array()
+	for i, key := range accountKeys {
+		if key.Get("pubkey").String() == pubkey || key.String() == pubkey {
+			owner, ok := tokenAccountMap[fmt.Sprintf("%d", i)]
+			return owner, ok
+		}
+	}
+
+	return solanaTokenOwner{}, false
 }

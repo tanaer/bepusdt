@@ -10,6 +10,7 @@ func epusdtInit(engine *gin.Engine) {
 	epHdr := new(epusdt.Epusdt)
 	{
 		epGrp.GET("/checkout/:trade_id", epHdr.Checkout)
+		epGrp.GET("/cashier/:trade_id", epHdr.Checkout)
 	}
 
 	orderGrp := engine.Group("/api/v1/order")
@@ -26,5 +27,6 @@ func epusdtInit(engine *gin.Engine) {
 		payGrp.POST("/notify", epHdr.Notify)
 		payGrp.POST("/methods", epHdr.GetMethods)
 		payGrp.POST("/update-order", epHdr.UpdateOrder)
+		payGrp.POST("/verify-transaction", epHdr.VerifyTransaction)
 	}
 }

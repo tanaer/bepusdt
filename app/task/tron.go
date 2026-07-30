@@ -31,6 +31,7 @@ var gasFreeOwnerAddress = []byte{0x41, 0x3b, 0x41, 0x50, 0x50, 0xb1, 0xe7, 0x9e,
 var gasFreeContractAddress = []byte{0x41, 0x39, 0xdd, 0x12, 0xa5, 0x4e, 0x2b, 0xab, 0x7c, 0x82, 0xaa, 0x14, 0xa1, 0xe1, 0x58, 0xb3, 0x42, 0x63, 0xd2, 0xd5, 0x10}
 var usdtTrc20ContractAddress = []byte{0x41, 0xa6, 0x14, 0xf8, 0x03, 0xb6, 0xfd, 0x78, 0x09, 0x86, 0xa4, 0x2c, 0x78, 0xec, 0x9c, 0x7f, 0x77, 0xe6, 0xde, 0xd1, 0x3c}
 var usdcTrc20ContractAddress = []byte{0x41, 0x34, 0x87, 0xb6, 0x3d, 0x30, 0xb5, 0xb2, 0xc8, 0x7f, 0xb7, 0xff, 0xa8, 0xbc, 0xfa, 0xde, 0x38, 0xea, 0xac, 0x1a, 0xbe}
+var newTronGrpcClient = utils.NewTronGrpcClient
 
 type tron struct {
 	lastBlockNum         int
@@ -83,12 +84,14 @@ func (t *tron) syncBlocksForward(context.Context) {
 	defer cancel()
 
 	if err1 != nil {
+		reportRPCFailure(conf.Tron, model.Endpoint(conf.Tron), err1)
 		log.Task.Warn("GetNowBlock2 超时：", err1)
 
 		return
 	}
 
 	var now = int(block.BlockHeader.RawData.Number)
+	model.SetChainProgress(conf.Tron, now)
 
 	// 区块高度变化过大，强制丢块重扫
 	if now-t.lastBlockNum > cast.ToInt(model.GetC(model.BlockHeightMaxDiff)) {
@@ -178,6 +181,7 @@ func (t *tron) blockParse(n any) {
 	cancel()
 	if err2 != nil {
 		conf.RecordFailure(conf.Tron)
+		reportRPCFailure(conf.Tron, model.Endpoint(conf.Tron), err2)
 		t.scheduleBlockRetry(num, 0)
 		log.Task.Warn("GetBlockByNum2 ", err2)
 
@@ -427,6 +431,7 @@ func (t *tron) tradeConfirmHandle(ctx context.Context) {
 		if o.TradeType == model.TronTrx {
 			trans, err := c.GetTransactionById(ctx, &api.BytesMessage{Value: idBytes})
 			if err != nil {
+				reportRPCFailure(conf.Tron, model.Endpoint(conf.Tron), err)
 				log.Task.Error("GetTransactionById", err)
 
 				return
@@ -441,6 +446,7 @@ func (t *tron) tradeConfirmHandle(ctx context.Context) {
 
 		info, err := c.GetTransactionInfoById(ctx, &api.BytesMessage{Value: idBytes})
 		if err != nil {
+			reportRPCFailure(conf.Tron, model.Endpoint(conf.Tron), err)
 			log.Task.Error("GetTransactionInfoById", err)
 
 			return
@@ -561,43 +567,59 @@ func tronRetryDelay(attempt int) time.Duration {
 }
 
 func (t *tron) client() (*grpc.ClientConn, error) {
-	var endpoint = model.Endpoint(conf.Tron)
+	endpoints := model.EndpointCandidates(conf.Tron)
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("连接失败: tron rpc endpoint is empty")
+	}
 
-	t.connMu.RLock()
-	if c, ok := t.conn[endpoint]; ok {
-		state := c.GetState()
-		if state == connectivity.Ready || state == connectivity.Idle {
+	var lastErr error
+	for range endpoints {
+		endpoint := model.Endpoint(conf.Tron)
+
+		t.connMu.RLock()
+		if c, ok := t.conn[endpoint]; ok {
+			state := c.GetState()
+			if state == connectivity.Ready || state == connectivity.Idle {
+				t.connMu.RUnlock()
+
+				return c, nil
+			}
+
 			t.connMu.RUnlock()
-
-			return c, nil
+		} else {
+			t.connMu.RUnlock()
 		}
 
-		t.connMu.RUnlock()
-	} else {
-		t.connMu.RUnlock()
-	}
+		t.connMu.Lock()
+		if c, ok := t.conn[endpoint]; ok {
+			state := c.GetState()
+			if state == connectivity.Ready || state == connectivity.Idle {
+				t.connMu.Unlock()
 
-	t.connMu.Lock()
-	defer t.connMu.Unlock()
+				return c, nil
+			}
 
-	if c, ok := t.conn[endpoint]; ok {
-		state := c.GetState()
-		if state == connectivity.Ready || state == connectivity.Idle {
-
-			return c, nil
+			c.Close()
+			delete(t.conn, endpoint)
 		}
 
-		c.Close()
+		conn, err := newTronGrpcClient(endpoint, model.GetTronGridApiKeys())
+		if err == nil {
+			t.conn[endpoint] = conn
+			t.connMu.Unlock()
+			log.Task.Info("Tron gRPC 连接已建立:", endpoint)
+
+			return conn, nil
+		}
+		t.connMu.Unlock()
+
+		lastErr = err
+		reportRPCFailure(conf.Tron, endpoint, err)
 	}
 
-	conn, err := utils.NewTronGrpcClient(endpoint, model.GetTronGridApiKeys())
-	if err != nil {
-
-		return nil, fmt.Errorf("连接失败: %w", err)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("unknown tron grpc error")
 	}
 
-	t.conn[endpoint] = conn
-	log.Task.Info("Tron gRPC 连接已建立:", endpoint)
-
-	return conn, nil
+	return nil, fmt.Errorf("连接失败: %w", lastErr)
 }

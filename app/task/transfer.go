@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -85,7 +86,16 @@ func orderTransferHandle(ctx context.Context) {
 			}
 
 			var other = make([]transfer, 0)
-			var orders = getReceivableOrders()
+			orders, err := getReceivableOrders()
+			if err != nil {
+				// A transient database read failure must never turn valid payments
+				// into non-order transfers. Keep the batch for the next retry.
+				log.Task.Warn("load receivable orders failed; retaining transfer batch:", err)
+				if shouldCheck {
+					expireWaitingOrders()
+				}
+				continue
+			}
 
 			for _, t := range batch {
 				// 判断数额是否在允许范围内
@@ -95,21 +105,40 @@ func orderTransferHandle(ctx context.Context) {
 
 				mqttPublish(t)
 
-				key := fmt.Sprintf("%s%s", t.RecvAddress, t.TradeType)
+				key := orderTransferKey(t.RecvAddress, t.TradeType)
 				orderList, ok := orders[key]
 				if !ok {
+					logOrderMatchMiss(t, orderMatchNoReceivableOrder, 0)
 					other = append(other, t)
 					continue
 				}
 
 				var matched bool
+				var mismatch orderMatchFailure = orderMatchNoReceivableOrder
 				for i, o := range orderList {
-					if !orderTransferMatch(o, t) {
+					if reason := orderTransferMatchReason(o, t); reason != orderMatchOK {
+						mismatch = reason
 						continue
 					}
 
 					// 订单匹配 进入确认流程
-					if err := o.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp, t.Amount); err != nil {
+					_, err := model.ClaimPaymentConfirmation(&o, model.PaymentConfirmation{
+						BlockNum: t.BlockNum,
+						From:     t.FromAddress,
+						Hash:     t.TxHash,
+						At:       t.Timestamp,
+						Amount:   t.Amount,
+					})
+					if err != nil {
+						if errors.Is(err, model.ErrOrderNoLongerReceivable) || errors.Is(err, model.ErrPaymentHashAlreadyClaimed) {
+							// Another worker has already handled this transfer or this
+							// order changed state after the snapshot was loaded. It is not
+							// non-order activity and must not trigger a false alert.
+							logOrderMatchMiss(t, orderMatchClaimFailed, o.ID)
+							matched = true
+							orders[key] = append(orderList[:i], orderList[i+1:]...)
+							break
+						}
 						log.Task.Warn("mark order confirming failed:", err)
 						continue
 					}
@@ -121,6 +150,7 @@ func orderTransferHandle(ctx context.Context) {
 				}
 
 				if !matched {
+					logOrderMatchMiss(t, mismatch, 0)
 					other = append(other, t)
 				}
 			}
@@ -138,18 +168,66 @@ func orderTransferHandle(ctx context.Context) {
 	}
 }
 
+type orderMatchFailure string
+
+const (
+	orderMatchOK                orderMatchFailure = ""
+	orderMatchNoReceivableOrder orderMatchFailure = "no_receivable_order"
+	orderMatchTradeType         orderMatchFailure = "trade_type"
+	orderMatchReceivingAddress  orderMatchFailure = "receiving_address"
+	orderMatchAmount            orderMatchFailure = "amount"
+	orderMatchPaymentTimeWindow orderMatchFailure = "payment_time_window"
+	orderMatchClaimFailed       orderMatchFailure = "payment_claim"
+)
+
 func orderTransferMatch(o model.Order, t transfer) bool {
-	if o.TradeType != t.TradeType || orderMatchAddress(o) != t.RecvAddress {
-		return false
+	return orderTransferMatchReason(o, t) == orderMatchOK
+}
+
+// orderTransferMatchReason is the canonical decision used by both the block
+// scanner and user-submitted transaction hashes. Keeping the reason lets us
+// diagnose a mismatch without silently downgrading it to a non-order payment.
+func orderTransferMatchReason(o model.Order, t transfer) orderMatchFailure {
+	if o.TradeType != t.TradeType {
+		return orderMatchTradeType
+	}
+	if !orderTransferAddressEqual(o.TradeType, orderMatchAddress(o), t.RecvAddress) {
+		return orderMatchReceivingAddress
 	}
 	if !o.AddressLocked && !amountMatch(t.Amount, o.Amount, string(o.TradeType)) {
-		return false
+		return orderMatchAmount
 	}
-	if !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
-		return false
+	if o.CreatedAt == nil || !o.CreatedAt.Before(t.Timestamp) || !o.ExpiredAt.After(t.Timestamp) {
+		return orderMatchPaymentTimeWindow
 	}
 
-	return true
+	return orderMatchOK
+}
+
+func orderTransferAddressEqual(tradeType model.TradeType, left, right string) bool {
+	if model.AddrCaseSens(tradeType) {
+		return left == right
+	}
+
+	return strings.EqualFold(left, right)
+}
+
+func orderTransferKey(address string, tradeType model.TradeType) string {
+	if !model.AddrCaseSens(tradeType) {
+		address = strings.ToLower(address)
+	}
+
+	return fmt.Sprintf("%s%s", address, tradeType)
+}
+
+func logOrderMatchMiss(t transfer, reason orderMatchFailure, orderID int64) {
+	if log.Task == nil {
+		return
+	}
+	log.Task.Warn(fmt.Sprintf(
+		"transfer classified as non-order: tx_hash=%s network=%s trade_type=%s recipient=%s amount=%s order_id=%d reason=%s",
+		t.TxHash, t.Network, t.TradeType, t.RecvAddress, t.Amount, orderID, reason,
+	))
 }
 
 func orderMatchAddress(o model.Order) string {
@@ -263,20 +341,22 @@ func receivableOrderStatuses() []int {
 	return []int{model.OrderStatusWaiting, model.OrderStatusExpired}
 }
 
-func getReceivableOrders() map[string][]model.Order {
+func getReceivableOrders() (map[string][]model.Order, error) {
 	var orders []model.Order
 	db := model.Db.Where("status in (?)", receivableOrderStatuses()).
 		Where("expired_at > ?", time.Now().Add(model.GetLookbackHour())).
 		Order("created_at asc")
-	db.Find(&orders)
+	if err := db.Find(&orders).Error; err != nil {
+		return nil, err
+	}
 
 	data := make(map[string][]model.Order)
 	for _, t := range orders {
-		key := orderMatchAddress(t) + string(t.TradeType)
+		key := orderTransferKey(orderMatchAddress(t), t.TradeType)
 		data[key] = append(data[key], t)
 	}
 
-	return data
+	return data, nil
 }
 
 func hasLookbackOrders(tradeType []model.TradeType) bool {

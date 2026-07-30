@@ -418,10 +418,21 @@ func IsAmountValid(t TradeType, d decimal.Decimal) bool {
 }
 
 func Endpoint(net Network) string {
-	if endpointKey, ok := networkEndpointMap[net]; ok {
-		return GetC(endpointKey)
+	endpoints := EndpointCandidates(net)
+	if len(endpoints) == 0 {
+		return ""
 	}
-	return ""
+
+	endpointMu.Lock()
+	defer endpointMu.Unlock()
+
+	index := endpointIndexes[net]
+	if index < 0 || index >= len(endpoints) {
+		index = 0
+		endpointIndexes[net] = index
+	}
+
+	return endpoints[index]
 }
 
 func GetTradeAtomKey(t TradeType) (ConfKey, bool) {

@@ -25,6 +25,8 @@ type AutoTimeAt struct {
 }
 
 func Init(path, mysql, postgres string) error {
+	resetRuntimeState()
+
 	if postgres != "" {
 		return initPostgres(postgres)
 	}
@@ -33,6 +35,21 @@ func Init(path, mysql, postgres string) error {
 	}
 
 	return initSqlite(path)
+}
+
+func resetRuntimeState() {
+	confCache.Range(func(key, value any) bool {
+		confCache.Delete(key)
+		return true
+	})
+	chainProgressState.Range(func(key, value any) bool {
+		chainProgressState.Delete(key)
+		return true
+	})
+
+	endpointMu.Lock()
+	endpointIndexes = make(map[Network]int)
+	endpointMu.Unlock()
 }
 
 func initSqlite(path string) error {
@@ -166,7 +183,7 @@ func initPostgres(dsn string) error {
 }
 
 func AutoMigrate() error {
-	return Db.AutoMigrate(&Wallet{}, &Order{}, &NotifyRecord{}, &Conf{}, &Rate{})
+	return Db.AutoMigrate(&Wallet{}, &Order{}, &PaymentHashClaim{}, &NotifyRecord{}, &Conf{}, &Rate{})
 }
 
 func Close() {

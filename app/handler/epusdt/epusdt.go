@@ -3,15 +3,18 @@ package epusdt
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 	"github.com/v03413/bepusdt/app/log"
 	"github.com/v03413/bepusdt/app/model"
+	"github.com/v03413/bepusdt/app/task"
 	"github.com/v03413/bepusdt/app/utils"
 )
 
@@ -63,6 +66,13 @@ type methodsReq struct {
 	TradeID  string `json:"trade_id" binding:"required"`
 	Currency string `json:"currency"`
 }
+
+type verifyTransactionReq struct {
+	TradeID string `json:"trade_id" binding:"required"`
+	TxHash  string `json:"tx_hash" binding:"required"`
+}
+
+var verifyAndClaimSubmittedPayment = task.VerifyAndClaimSubmittedPayment
 
 // tradeTypeReselect 返回本次 create-order 是否允许确认交易类型后再次重选；未传 reselect 时使用后台全局配置。
 func (r createOrderReq) tradeTypeReselect() bool {
@@ -394,24 +404,101 @@ func (Epusdt) Info(ctx *gin.Context) {
 		return
 	}
 
+	var returnURL string
+	if order.Status == model.OrderStatusSuccess {
+		returnURL = order.ReturnUrl
+		if order.ApiType == model.OrderApiTypeEpay {
+			returnURL = fmt.Sprintf("%s?%s", returnURL, order.BuildNotifyParams())
+		}
+	}
+	progress := model.GetChainProgress(order)
+
 	ctx.JSON(200, respSuccJson(gin.H{
-		"network":       order.Network(),                     // 网络信息
-		"trade_id":      order.TradeId,                       // 交易编号
-		"order_id":      order.OrderId,                       // 商户订单
-		"trade_type":    order.TradeType,                     // 交易类型
-		"status":        order.Status,                        // 订单状态
-		"money":         order.Money,                         // 订单金额
-		"actual_amount": order.Amount,                        // 实付数额
-		"token":         order.Address,                       // 收款地址
-		"fiat":          order.Fiat,                          // 法币类型
-		"name":          order.Name,                          // 商品名称
-		"expired_at":    order.ExpiredAt.Unix(),              // 截止时间
-		"created_at":    order.CreatedAt.Time().Unix(),       // 创建时间
-		"trade_url":     order.GetTxUrl(),                    // 链上详情
-		"support_url":   model.GetC(model.PaymentSupportUrl), // 客服链接
-		"redirect_url":  order.RedirectUrl(),                 // 跳转地址
-		"reselect":      order.CanReselectPayment(),          // 是否允许确认交易类型后重选
+		"network":                order.Network(),
+		"trade_id":               order.TradeId,
+		"order_id":               order.OrderId,
+		"trade_type":             order.TradeType,
+		"status":                 order.Status,
+		"money":                  order.Money,
+		"actual_amount":          order.Amount,
+		"token":                  order.Address,
+		"fiat":                   order.Fiat,
+		"name":                   order.Name,
+		"expired_at":             order.ExpiredAt.Unix(),
+		"created_at":             order.CreatedAt.Time().Unix(),
+		"trade_url":              order.GetTxUrl(),
+		"support_url":            model.GetC(model.PaymentSupportUrl),
+		"redirect_url":           order.RedirectUrl(),
+		"return_url":             returnURL,
+		"trade_hash":             order.RefHash,
+		"confirmations":          progress.Current,
+		"required_confirmations": progress.Required,
+		"reselect":               order.CanReselectPayment(),
 	}))
+}
+
+// VerifyTransaction lets a payer submit an on-chain transaction hash as a
+// verification clue. The task layer independently fetches and validates the
+// transaction before this endpoint can move an order into confirmation.
+func (Epusdt) VerifyTransaction(ctx *gin.Context) {
+	var req verifyTransactionReq
+	if err := ctx.ShouldBindJSON(&req); err != nil {
+		ctx.JSON(200, respFailJson("invalid transaction verification request"))
+		return
+	}
+
+	order, ok := model.GetTradeOrder(req.TradeID)
+	if !ok {
+		ctx.JSON(200, respFailJson("order not found"))
+		return
+	}
+
+	if (order.Status == model.OrderStatusConfirming || order.Status == model.OrderStatusSuccess) &&
+		order.RefHash != "" && strings.EqualFold(order.RefHash, strings.TrimSpace(req.TxHash)) {
+		ctx.JSON(200, respSuccJson(gin.H{
+			"trade_id":   order.TradeId,
+			"status":     order.Status,
+			"trade_hash": order.RefHash,
+			"idempotent": true,
+		}))
+		return
+	}
+	if order.Status != model.OrderStatusWaiting && order.Status != model.OrderStatusExpired {
+		ctx.JSON(200, respFailJson("the current order status does not allow transaction verification"))
+		return
+	}
+
+	_, err := verifyAndClaimSubmittedPayment(ctx.Request.Context(), &order, req.TxHash)
+	if err != nil {
+		ctx.JSON(200, respFailJson(submittedPaymentErrorMessage(err)))
+		return
+	}
+
+	ctx.JSON(200, respSuccJson(gin.H{
+		"trade_id":   order.TradeId,
+		"status":     order.Status,
+		"trade_hash": order.RefHash,
+	}))
+}
+
+func submittedPaymentErrorMessage(err error) string {
+	switch {
+	case errors.Is(err, task.ErrInvalidSubmittedPaymentHash):
+		return "invalid transaction hash"
+	case errors.Is(err, task.ErrUnsupportedSubmittedPayment):
+		return "transaction hash verification is not available for this payment network"
+	case errors.Is(err, task.ErrSubmittedPaymentNotFound):
+		return "transaction was not found or has not been confirmed on-chain yet"
+	case errors.Is(err, task.ErrSubmittedPaymentDoesNotMatch):
+		return "the submitted transaction does not match this order"
+	case errors.Is(err, model.ErrPaymentHashAlreadyClaimed):
+		return "this transaction has already been used for another order"
+	case errors.Is(err, model.ErrOrderNoLongerReceivable):
+		return "the current order status does not allow transaction verification"
+	default:
+		log.Warn(fmt.Sprintf("verify submitted transaction failed: %v", err))
+		return "unable to verify this transaction right now; please try again"
+	}
 }
 
 func (Epusdt) SignVerify(ctx *gin.Context) {

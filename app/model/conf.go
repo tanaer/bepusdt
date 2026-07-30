@@ -29,15 +29,15 @@ var defaultConf = map[ConfKey]string{
 	PaymentMinAmount:        "0.01",
 	PaymentMaxAmount:        "99999",
 	RpcEndpointTron:         "grpc.trongrid.io:50051",
-	RpcEndpointBsc:          "https://binance-smart-chain-public.nodies.app/",
-	RpcEndpointSolana:       "https://solana-rpc.publicnode.com/",
-	RpcEndpointXlayer:       "https://xlayerrpc.okx.com/",
-	RpcEndpointPolygon:      "https://polygon-public.nodies.app/",
-	RpcEndpointArbitrum:     "https://arb1.arbitrum.io/rpc",
-	RpcEndpointEthereum:     "https://ethereum-public.nodies.app/",
-	RpcEndpointBase:         "https://base-public.nodies.app/",
-	RpcEndpointAptos:        "https://aptos-rest.publicnode.com/",
-	RpcEndpointPlasma:       "https://rpc.plasma.to/",
+	RpcEndpointBsc:          "https://bsc-rpc.publicnode.com,https://bsc-dataseed.binance.org,https://binance-smart-chain-public.nodies.app/",
+	RpcEndpointSolana:       "https://solana-rpc.publicnode.com,https://api.mainnet-beta.solana.com",
+	RpcEndpointXlayer:       "https://xlayerrpc.okx.com/,https://rpc.xlayer.tech",
+	RpcEndpointPolygon:      "https://polygon-bor-rpc.publicnode.com,https://polygon-public.nodies.app/,https://polygon.drpc.org",
+	RpcEndpointArbitrum:     "https://arb1.arbitrum.io/rpc,https://arbitrum-one-rpc.publicnode.com,https://arbitrum.drpc.org",
+	RpcEndpointEthereum:     "https://ethereum-rpc.publicnode.com,https://eth.drpc.org,https://rpc.flashbots.net",
+	RpcEndpointBase:         "https://mainnet.base.org,https://base-rpc.publicnode.com,https://base.drpc.org",
+	RpcEndpointAptos:        "https://fullnode.mainnet.aptoslabs.com/,https://aptos-rest.publicnode.com/",
+	RpcEndpointPlasma:       "https://rpc.plasma.to/,https://plasma.drpc.org",
 	RpcGlobalConfigUrlTon:   "https://ton.org/global-config.json",
 	NotifyMaxRetry:          "10",
 	BlockHeightMaxDiff:      "1000",
@@ -76,12 +76,14 @@ func SetK(k ConfKey, v string) {
 			return err2
 		}
 
-		defer RefreshC()
-
 		return nil
 	}); err != nil {
 		_, _ = fmt.Fprintln(os.Stderr, fmt.Sprintf("设置配置项 %s 错误：%s", k, err.Error()))
+
+		return
 	}
+
+	RefreshC()
 }
 
 func GetK(k ConfKey) string {

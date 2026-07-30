@@ -3,7 +3,6 @@ package task
 import (
 	"context"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"strings"
@@ -13,7 +12,6 @@ import (
 	"github.com/panjf2000/ants/v2"
 	"github.com/shopspring/decimal"
 	"github.com/smallnest/chanx"
-	"github.com/spf13/cast"
 	"github.com/tidwall/gjson"
 	"github.com/v03413/bepusdt/app/conf"
 	blockapi "github.com/v03413/bepusdt/app/core"
@@ -73,25 +71,17 @@ func (a *aptos) syncVersionForward(ctx context.Context) {
 		return
 	}
 
-	req, _ := http.NewRequestWithContext(ctx, "GET", model.Endpoint(conf.Aptos)+"/v1", nil)
-	resp, err := a.client.Do(req)
+	body, _, err := doRPCRequestWithFailover(ctx, a.client, conf.Aptos, func(endpoint string) (*http.Request, error) {
+		return http.NewRequestWithContext(ctx, "GET", endpoint+"/v1", nil)
+	}, func(body []byte) error {
+		data := gjson.ParseBytes(body)
+		if data.Get("message").String() != "" && data.Get("ledger_version").String() == "" {
+			return fmt.Errorf("%s", data.Get("message").String())
+		}
+		return nil
+	})
 	if err != nil {
-		log.Task.Warn("aptos syncVersionForward Error sending request:", err)
-
-		return
-	}
-
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		log.Task.Warn("aptos syncVersionForward Error response status code:", resp.StatusCode)
-
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		log.Task.Warn("aptos syncVersionForward Error reading response body:", err)
+		log.Task.Warn("aptos syncVersionForward Error:", err)
 
 		return
 	}
@@ -102,6 +92,7 @@ func (a *aptos) syncVersionForward(ctx context.Context) {
 
 		return
 	}
+	model.SetChainProgress(conf.Aptos, now)
 
 	if now-a.lastVersion > 10000 {
 		a.lastVersion = now - a.versionChunkSize
@@ -191,30 +182,13 @@ func (a *aptos) versionParse(n any) {
 	p := n.(version)
 
 	var net = conf.Aptos
-	var url = fmt.Sprintf("%sv1/transactions?start=%d&limit=%d", model.Endpoint(conf.Aptos), p.Start, p.Limit)
-
-	conf.RecordSuccess(net, cast.ToString(p.Start+p.Limit))
-	resp, err := a.client.Get(url)
+	body, _, err := doRPCRequestWithFailover(context.Background(), a.client, net, func(endpoint string) (*http.Request, error) {
+		url := fmt.Sprintf("%sv1/transactions?start=%d&limit=%d", endpoint, p.Start, p.Limit)
+		return http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	}, nil)
 	if err != nil {
-		conf.RecordFailure(net)
-		log.Task.Warn("versionParse Error sending request:", err)
-
-		return
-	}
-
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		conf.RecordFailure(net)
-		log.Task.Warn("versionParse Error response status code:", resp.StatusCode)
-
-		return
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		conf.RecordFailure(net)
 		a.versionQueue.In <- p
-		log.Task.Warn("versionParse Error reading response body:", err)
+		log.Task.Warn("versionParse Error:", err)
 
 		return
 	}
@@ -402,36 +376,22 @@ func (a *aptos) tradeConfirmHandle(ctx context.Context) {
 			}
 		}
 
-		req, _ := http.NewRequestWithContext(ctx, "GET", model.Endpoint(conf.Aptos)+"v1/transactions/by_hash/"+o.RefHash, nil)
-		resp, err := a.client.Do(req)
+		body, _, err := doRPCRequestWithFailover(ctx, a.client, conf.Aptos, func(endpoint string) (*http.Request, error) {
+			return http.NewRequestWithContext(ctx, "GET", endpoint+"v1/transactions/by_hash/"+o.RefHash, nil)
+		}, func(body []byte) error {
+			data := gjson.ParseBytes(body)
+			if data.Get("error_code").Exists() {
+				return fmt.Errorf("%s", data.Get("message").String())
+			}
+			return nil
+		})
 		if err != nil {
-			log.Task.Warn("aptos tradeConfirmHandle Error sending request:", err)
-
-			return
-		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			log.Task.Warn("aptos tradeConfirmHandle Error response status code:", resp.StatusCode)
-
-			return
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			log.Task.Warn("aptos tradeConfirmHandle Error reading response body:", err)
+			log.Task.Warn("aptos tradeConfirmHandle Error:", err)
 
 			return
 		}
 
 		data := gjson.ParseBytes(body)
-		if data.Get("error_code").Exists() {
-			log.Task.Warn("aptos tradeConfirmHandle Error:", data.Get("message").String())
-
-			return
-		}
-
 		if data.Get("version").String() != "" &&
 			data.Get("success").Bool() &&
 			data.Get("vm_status").String() == "Executed successfully" {
