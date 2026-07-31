@@ -208,9 +208,18 @@ func (e *evm) getBlockByNumber(a any) {
 		req.Header.Set("Content-Type", "application/json")
 		return req, nil
 	}, func(body []byte) error {
-		for _, itm := range gjson.ParseBytes(body).Array() {
+		items := gjson.ParseBytes(body).Array()
+		expected := int(b.To - b.From + 1)
+		if len(items) != expected {
+			return fmt.Errorf("incomplete block batch response: expected %d blocks, got %d", expected, len(items))
+		}
+		for _, itm := range items {
 			if itm.Get("error").Exists() {
 				return errors.New(itm.Get("error").String())
+			}
+			result := itm.Get("result")
+			if !result.Exists() || result.Raw == "null" || result.Get("number").String() == "" || result.Get("timestamp").String() == "" {
+				return fmt.Errorf("block %s is temporarily unavailable", result.Get("number").String())
 			}
 		}
 		return nil
