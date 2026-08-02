@@ -2,6 +2,7 @@ package task
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,17 @@ import (
 	"github.com/v03413/bepusdt/app/log"
 	"github.com/v03413/bepusdt/app/model"
 )
+
+type rpcTerminalError struct {
+	err error
+}
+
+func (e rpcTerminalError) Error() string { return e.err.Error() }
+func (e rpcTerminalError) Unwrap() error { return e.err }
+
+func terminalRPCError(err error) error {
+	return rpcTerminalError{err: err}
+}
 
 func reportRPCFailure(network, endpoint string, reason any) {
 	conf.RecordFailure(network)
@@ -91,6 +103,10 @@ func doRPCRequestWithFailover(
 		if validate != nil {
 			if err := validate(body); err != nil {
 				lastErr = err
+				var terminal rpcTerminalError
+				if errors.As(err, &terminal) {
+					return nil, endpoint, err
+				}
 				reportRPCFailure(network, endpoint, err)
 				continue
 			}

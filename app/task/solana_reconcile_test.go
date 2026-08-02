@@ -260,6 +260,45 @@ func TestSolanaSlotParseRequeuesWhenRPCBlockIsTemporarilyUnavailable(t *testing.
 	}
 }
 
+func TestSolanaSlotParseDoesNotRequeuePermanentlySkippedSlot(t *testing.T) {
+	initSolanaReconcileTestLog(t)
+
+	dbPath := filepath.Join(t.TempDir(), "solana-skipped-slot.db")
+	if err := model.Init(dbPath, "", ""); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	t.Cleanup(model.Close)
+
+	skipped := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32007,"message":"Slot 436683136 was skipped, or missing due to ledger jump to recent snapshot"}}`))
+	}))
+	defer skipped.Close()
+
+	rateLimitedCalls := 0
+	rateLimited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		rateLimitedCalls++
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"error":{"code":-32005,"message":"rate limit exceeded"}}`))
+	}))
+	defer rateLimited.Close()
+
+	model.SetK(model.RpcEndpointSolana, skipped.URL+","+rateLimited.URL)
+	model.RefreshC()
+
+	const slot = 436683136
+	s := newSolana()
+	s.client = skipped.Client()
+	s.slotParse(slot)
+
+	select {
+	case got := <-s.slotQueue.Out:
+		t.Fatalf("permanently skipped slot must not be requeued, got %d", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if rateLimitedCalls != 0 {
+		t.Fatalf("permanently skipped slot must not fail over, second endpoint called %d times", rateLimitedCalls)
+	}
+}
+
 func TestSolanaParseTransferRecognizesReportedTransaction(t *testing.T) {
 	accountKeys := []string{
 		"H1NwZnujLy6q2q9Mj813xCMSzkmYE6p6PzyC2zswJSmK",
@@ -299,6 +338,48 @@ func TestSolanaParseTransferRecognizesReportedTransaction(t *testing.T) {
 	}
 	if got.Amount.String() != "1.32" {
 		t.Fatalf("expected amount 1.32, got %s", got.Amount)
+	}
+}
+
+func TestSolanaParseTransferRecognizesReportedMultisigUSDCTransaction(t *testing.T) {
+	accountKeys := []string{
+		"BhJuSLM8WzkM71umK4UQXXRfVB4ZoHbaDsEQercc2eMX",
+		"23PXKLkUNQ85LScKDZVWhHLzFppYiSVky2Z7iqkk4JFu",
+		"8w7MbgKz4mRu2Ku9KS2JQ519mZfX4fgiN6qrjdEuAG8H",
+		"ComputeBudget111111111111111111111111111111",
+		"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+		"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+	}
+	tokenAccounts := map[string]solanaTokenOwner{
+		accountKeys[1]: {
+			TradeType: model.UsdcSolana,
+			Address:   "DAzEQJ8TzdmrAgphrcGGZie4fwiXmRYXRCKX4wQh2oLf",
+		},
+		accountKeys[2]: {
+			TradeType: model.UsdcSolana,
+			Address:   "BhJuSLM8WzkM71umK4UQXXRfVB4ZoHbaDsEQercc2eMX",
+		},
+	}
+	instruction := gjson.Parse(`{
+		"accounts":[2,4,1,0,0],
+		"data":"hwaXrj5gCKML9",
+		"programIdIndex":5
+	}`)
+
+	s := newSolana()
+	got := s.parseTransfer(instruction, accountKeys, tokenAccounts)
+
+	if got.TradeType != model.UsdcSolana {
+		t.Fatalf("expected trade type %s, got %s", model.UsdcSolana, got.TradeType)
+	}
+	if got.FromAddress != "BhJuSLM8WzkM71umK4UQXXRfVB4ZoHbaDsEQercc2eMX" {
+		t.Fatalf("unexpected sender: %s", got.FromAddress)
+	}
+	if got.RecvAddress != "DAzEQJ8TzdmrAgphrcGGZie4fwiXmRYXRCKX4wQh2oLf" {
+		t.Fatalf("unexpected recipient: %s", got.RecvAddress)
+	}
+	if got.Amount.String() != "2.65" {
+		t.Fatalf("expected amount 2.65, got %s", got.Amount)
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -41,6 +42,8 @@ type solanaTokenOwner struct {
 }
 
 var sol solana
+
+var errSolanaSlotSkipped = errors.New("solana slot was permanently skipped")
 
 func init() {
 	sol = newSolana()
@@ -152,8 +155,11 @@ func (s *solana) slotParse(n any) {
 		return req, nil
 	}, func(body []byte) error {
 		data := gjson.ParseBytes(body)
-		if data.Get("error").Exists() {
-			return fmt.Errorf("%s", data.Get("error").String())
+		if rpcErr := data.Get("error"); rpcErr.Exists() {
+			if rpcErr.Get("code").Int() == -32007 {
+				return terminalRPCError(fmt.Errorf("%w: %s", errSolanaSlotSkipped, rpcErr.Get("message").String()))
+			}
+			return fmt.Errorf("%s", rpcErr.String())
 		}
 		result := data.Get("result")
 		if !result.Exists() || result.Raw == "null" {
@@ -162,6 +168,10 @@ func (s *solana) slotParse(n any) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errSolanaSlotSkipped) {
+			log.Task.Info(fmt.Sprintf("Solana 跳过永久缺失 Slot：%d", slot))
+			return
+		}
 		s.slotQueue.In <- slot
 		log.Task.Warn("slotParse Error:", err)
 
