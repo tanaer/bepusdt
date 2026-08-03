@@ -299,6 +299,116 @@ func TestSolanaSlotParseDoesNotRequeuePermanentlySkippedSlot(t *testing.T) {
 	}
 }
 
+func TestSolanaSlotParseSkipsFailedTransactions(t *testing.T) {
+	initSolanaReconcileTestLog(t)
+
+	if err := model.Init(filepath.Join(t.TempDir(), "solana-failed-slot.db"), "", ""); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	t.Cleanup(model.Close)
+
+	blockTime := time.Now().Add(-time.Minute).Unix()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(fmt.Sprintf(`{
+			"jsonrpc":"2.0",
+			"id":1,
+			"result":{
+				"blockTime":%d,
+				"transactions":[{
+					"meta":{
+						"err":{"InstructionError":[0,"Custom"]},
+						"preTokenBalances":[
+							{"accountIndex":1,"mint":"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+							{"accountIndex":2,"mint":"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+						],
+						"postTokenBalances":[
+							{"accountIndex":1,"mint":"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+							{"accountIndex":2,"mint":"Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+						],
+						"innerInstructions":[]
+					},
+					"transaction":{
+						"signatures":["%s"],
+						"message":{
+							"accountKeys":["%s","source-token-account","destination-token-account","ComputeBudget111111111111111111111111111111","Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB","TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"],
+							"instructions":[{"programIdIndex":5,"accounts":[1,4,2,0],"data":"gvJRrNPqACL1K"}]
+						}
+					}
+				}]
+			}
+		}`, blockTime, testSolanaSender, testSolanaOwner, testSolanaSender, testSolanaOwner, testSolanaTxHash, testSolanaSender)))
+	}))
+	defer server.Close()
+
+	model.SetK(model.RpcEndpointSolana, server.URL)
+	model.RefreshC()
+
+	s := newSolana()
+	s.client = server.Client()
+	s.slotParse(435577393)
+
+	select {
+	case queued := <-transferQueue.Out:
+		t.Fatalf("failed Solana transaction must not enter the transfer queue: %+v", queued)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSolanaTradeConfirmHandleDoesNotFinalizeFailedTransaction(t *testing.T) {
+	initSolanaReconcileTestLog(t)
+
+	if err := model.Init(filepath.Join(t.TempDir(), "solana-failed-confirmation.db"), "", ""); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	t.Cleanup(model.Close)
+
+	now := time.Now().UTC()
+	confirmedAt := now.Add(-time.Minute)
+	createdAt := model.Datetime(now.Add(-2 * time.Minute))
+	order := model.Order{
+		OrderId:     "failed-solana-confirmation",
+		TradeId:     "failed-solana-confirmation-trade",
+		TradeType:   model.UsdcSolana,
+		Crypto:      model.USDC,
+		Amount:      "2.65",
+		Money:       "20",
+		Address:     testSolanaOwner,
+		Status:      model.OrderStatusConfirming,
+		RefHash:     testSolanaTxHash,
+		RefBlockNum: 424729879,
+		ConfirmedAt: &confirmedAt,
+		ExpiredAt:   now.Add(time.Hour),
+		AutoTimeAt: model.AutoTimeAt{
+			CreatedAt: &createdAt,
+			UpdatedAt: &createdAt,
+		},
+	}
+	if err := model.Db.Create(&order).Error; err != nil {
+		t.Fatalf("create confirming order: %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":1,"result":{"value":[{"slot":424729879,"confirmationStatus":"finalized","err":{"InstructionError":[0,"Custom"]}}]}}`))
+	}))
+	defer server.Close()
+
+	model.SetK(model.RpcEndpointSolana, server.URL)
+	model.SetK(model.BlockOffsetConfirm, "0")
+	model.RefreshC()
+
+	s := newSolana()
+	s.client = server.Client()
+	s.tradeConfirmHandle(context.Background())
+
+	var refreshed model.Order
+	if err := model.Db.First(&refreshed, order.ID).Error; err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if refreshed.Status != model.OrderStatusConfirming {
+		t.Fatalf("failed finalized Solana transaction changed order status to %d, want confirming", refreshed.Status)
+	}
+}
+
 func TestSolanaParseTransferRecognizesReportedTransaction(t *testing.T) {
 	accountKeys := []string{
 		"H1NwZnujLy6q2q9Mj813xCMSzkmYE6p6PzyC2zswJSmK",

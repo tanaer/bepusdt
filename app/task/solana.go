@@ -181,6 +181,12 @@ func (s *solana) slotParse(n any) {
 	timestamp := time.Unix(gjson.GetBytes(body, "result.blockTime").Int(), 0)
 
 	for _, trans := range gjson.GetBytes(body, "result.transactions").Array() {
+		// A failed transaction can still retain parsed SPL instructions and token
+		// balances in getBlock. It must never reach the generic transfer matcher.
+		if txErr := trans.Get("meta.err"); txErr.Exists() && txErr.Raw != "null" {
+			continue
+		}
+
 		hash := trans.Get("transaction.signatures.0").String()
 
 		// 解析账号索引
@@ -361,7 +367,14 @@ func (s *solana) tradeConfirmHandle(ctx context.Context) {
 		}
 
 		data := gjson.ParseBytes(body)
-		if data.Get("result.value.0.confirmationStatus").String() == "finalized" {
+		status := data.Get("result.value.0")
+		// Solana finalizes both successful and failed transactions. The status
+		// must therefore be finalized *and* have a null execution error before
+		// an order can become successful or trigger a merchant callback.
+		if txErr := status.Get("err"); txErr.Exists() && txErr.Raw != "null" {
+			return
+		}
+		if status.Get("confirmationStatus").String() == "finalized" {
 
 			markFinalConfirmed(o)
 		}
