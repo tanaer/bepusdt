@@ -116,6 +116,23 @@ func sameSubmittedPaymentHash(tradeType model.TradeType, left, right string) boo
 	return leftErr == nil && rightErr == nil && normalizedLeft == normalizedRight
 }
 
+// findMatchingSubmittedPayment examines every transfer contained in a
+// transaction. A single TRON, BSC, or Solana transaction can emit multiple
+// transfers of the same asset, so accepting only its first transfer would
+// incorrectly reject a later transfer that actually pays this order.
+func findMatchingSubmittedPayment(order model.Order, candidates []transfer) (transfer, bool) {
+	for _, payment := range candidates {
+		if !model.IsAmountValid(payment.TradeType, payment.Amount) {
+			continue
+		}
+		if orderTransferMatchReason(order, payment) == orderMatchOK {
+			return payment, true
+		}
+	}
+
+	return transfer{}, false
+}
+
 func isTronTrade(tradeType model.TradeType) bool {
 	return tradeType == model.TronTrx || tradeType == model.UsdtTrc20 || tradeType == model.UsdcTrc20
 }
@@ -167,14 +184,11 @@ func lookupSolanaSubmittedPayment(ctx context.Context, order model.Order, hash s
 		return transfer{}, ErrSubmittedPaymentNotFound
 	}
 
-	for _, payment := range parseSolanaParsedTransfers(result) {
-		payment.TxHash = hash
-		if !model.IsAmountValid(payment.TradeType, payment.Amount) {
-			continue
-		}
-		if orderTransferMatchReason(order, payment) != orderMatchOK {
-			continue
-		}
+	candidates := parseSolanaParsedTransfers(result)
+	for i := range candidates {
+		candidates[i].TxHash = hash
+	}
+	if payment, ok := findMatchingSubmittedPayment(order, candidates); ok {
 		return payment, nil
 	}
 
@@ -210,10 +224,8 @@ func lookupTronSubmittedPayment(ctx context.Context, order model.Order, hash str
 	}
 
 	candidates := tr.parseSubmittedTransaction(hash, transaction, time.UnixMilli(info.GetBlockTimeStamp()), int(info.GetBlockNumber()))
-	for _, payment := range candidates {
-		if payment.TradeType == order.TradeType {
-			return payment, nil
-		}
+	if payment, ok := findMatchingSubmittedPayment(order, candidates); ok {
+		return payment, nil
 	}
 
 	return transfer{}, ErrSubmittedPaymentDoesNotMatch
@@ -353,10 +365,13 @@ func lookupBscSubmittedPayment(ctx context.Context, order model.Order, hash stri
 		if !fromOK || !recipientOK || !amountOK || amount.Sign() <= 0 {
 			continue
 		}
-		return transfer{
+		candidate := transfer{
 			Network: conf.Bsc, TxHash: hash, Amount: decimal.NewFromBigInt(amount, model.GetTradeDecimal(tradeType)),
 			FromAddress: from, RecvAddress: recipient, Timestamp: timestamp, TradeType: tradeType, BlockNum: blockNum,
-		}, nil
+		}
+		if payment, ok := findMatchingSubmittedPayment(order, []transfer{candidate}); ok {
+			return payment, nil
+		}
 	}
 
 	return transfer{}, ErrSubmittedPaymentDoesNotMatch

@@ -212,6 +212,7 @@ func TestVerifySubmittedPaymentFetchesAndValidatesBscTransfer(t *testing.T) {
 	const transactionHash = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	const sender = "0x0000000000000000000000000000000000000001"
 	const receiver = "0x00000000000000000000000000000000000000aa"
+	const unrelatedReceiver = "0x00000000000000000000000000000000000000bb"
 	const blockNumber = "0x64"
 	const timestamp = "0x6694b540"
 	amount := big.NewInt(0)
@@ -227,8 +228,11 @@ func TestVerifySubmittedPaymentFetchesAndValidatesBscTransfer(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch request.Method {
 		case "eth_getTransactionReceipt":
-			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"status":"0x1","blockNumber":%q,"logs":[{"address":%q,"topics":[%q,%q,%q],"data":%q}]}}`,
-				blockNumber, conf.UsdtBep20, evmTransferEvent, paddedEvmTopic(sender), paddedEvmTopic(receiver), "0x"+amount.Text(16))
+			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"status":"0x1","blockNumber":%q,"logs":[{"address":%q,"topics":[%q,%q,%q],"data":%q},{"address":%q,"topics":[%q,%q,%q],"data":%q}]}}`,
+				blockNumber,
+				conf.UsdtBep20, evmTransferEvent, paddedEvmTopic(sender), paddedEvmTopic(unrelatedReceiver), "0x"+amount.Text(16),
+				conf.UsdtBep20, evmTransferEvent, paddedEvmTopic(sender), paddedEvmTopic(receiver), "0x"+amount.Text(16),
+			)
 		case "eth_getBlockByNumber":
 			_, _ = fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"number":%q,"timestamp":%q}}`, blockNumber, timestamp)
 		default:
