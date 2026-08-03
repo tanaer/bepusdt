@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/btcsuite/btcd/btcutil/base58"
+	gosqlite "github.com/glebarez/go-sqlite"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 var (
@@ -19,6 +21,11 @@ var (
 	ErrPaymentHashAlreadyClaimed = errors.New("payment hash is already claimed by another order")
 	// ErrOrderNoLongerReceivable means that an order cannot accept a new payment.
 	ErrOrderNoLongerReceivable = errors.New("order is no longer receivable")
+)
+
+const (
+	paymentClaimSQLiteBusyMaxAttempts = 3
+	paymentClaimSQLiteBusyRetryDelay  = 5 * time.Millisecond
 )
 
 // PaymentHashClaim is a durable, cross-process uniqueness guard. A payment
@@ -179,6 +186,20 @@ func applyClaimedPaymentConfirmation(tx *gorm.DB, order *Order, payment PaymentC
 	return nil
 }
 
+func shouldRetryPaymentClaimSQLiteBusy(err error) bool {
+	if err == nil || Db == nil || Db.Dialector == nil || Db.Dialector.Name() != "sqlite" {
+		return false
+	}
+
+	var sqliteErr *gosqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		return false
+	}
+	// SQLite extended result codes retain the primary result code in the low
+	// byte, so this accepts both SQLITE_BUSY and SQLITE_BUSY_SNAPSHOT.
+	return sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
+}
+
 // ClaimPaymentConfirmation atomically reserves a transaction hash and moves a
 // waiting (or lookback-expired) order into the existing confirming workflow.
 // Repeating a successful claim for the same order is intentionally idempotent.
@@ -192,66 +213,73 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 		return false, fmt.Errorf("claim payment confirmation: transaction hash is required")
 	}
 
-	var updated Order
-	err = Db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", order.ID).First(&updated).Error; err != nil {
-			return err
-		}
-		claimHash, err := paymentHashClaimKey(updated.TradeType, originalHash)
-		if err != nil {
-			return err
-		}
-
-		if updated.RefHash != "" && PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) &&
-			(updated.Status == OrderStatusConfirming || updated.Status == OrderStatusSuccess) {
-			alreadyClaimed = true
-			return nil
-		}
-		if updated.Status != OrderStatusWaiting && updated.Status != OrderStatusExpired {
-			return ErrOrderNoLongerReceivable
-		}
-		// Records created before payment-hash claims were introduced do not have
-		// a claim row. Check the order table as a migration-safe fallback before
-		// reserving this hash for a new order.
-		if err := legacyPaymentHashAlreadyClaimed(tx, updated, originalHash); err != nil {
-			return err
-		}
-		if isSolanaPaymentTrade(updated.TradeType) {
-			if err := legacyRawSolanaPaymentHashAlreadyClaimed(tx, originalHash); err != nil {
+	for attempt := 0; attempt < paymentClaimSQLiteBusyMaxAttempts; attempt++ {
+		var updated Order
+		alreadyClaimed = false
+		err = Db.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", order.ID).First(&updated).Error; err != nil {
 				return err
 			}
-		}
-
-		claim := PaymentHashClaim{Hash: claimHash, OrderID: updated.ID}
-		create := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&claim)
-		if create.Error != nil {
-			return create.Error
-		}
-		if create.RowsAffected == 0 {
-			var existing PaymentHashClaim
-			lookupErr := tx.Where("hash = ?", claimHash).First(&existing).Error
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if existing.OrderID != updated.ID {
-				return ErrPaymentHashAlreadyClaimed
-			}
-			if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", updated.ID).First(&updated).Error; err != nil {
+			claimHash, err := paymentHashClaimKey(updated.TradeType, originalHash)
+			if err != nil {
 				return err
 			}
-			if PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) {
+
+			if updated.RefHash != "" && PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) &&
+				(updated.Status == OrderStatusConfirming || updated.Status == OrderStatusSuccess) {
 				alreadyClaimed = true
 				return nil
 			}
-			return fmt.Errorf("%w: existing order claim does not match transaction hash", ErrPaymentHashAlreadyClaimed)
-		}
+			if updated.Status != OrderStatusWaiting && updated.Status != OrderStatusExpired {
+				return ErrOrderNoLongerReceivable
+			}
+			// Records created before payment-hash claims were introduced do not have
+			// a claim row. Check the order table as a migration-safe fallback before
+			// reserving this hash for a new order.
+			if err := legacyPaymentHashAlreadyClaimed(tx, updated, originalHash); err != nil {
+				return err
+			}
+			if isSolanaPaymentTrade(updated.TradeType) {
+				if err := legacyRawSolanaPaymentHashAlreadyClaimed(tx, originalHash); err != nil {
+					return err
+				}
+			}
 
-		return applyClaimedPaymentConfirmation(tx, &updated, payment)
-	})
-	if err != nil {
-		return false, err
+			claim := PaymentHashClaim{Hash: claimHash, OrderID: updated.ID}
+			create := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&claim)
+			if create.Error != nil {
+				return create.Error
+			}
+			if create.RowsAffected == 0 {
+				var existing PaymentHashClaim
+				lookupErr := tx.Where("hash = ?", claimHash).First(&existing).Error
+				if lookupErr != nil {
+					return lookupErr
+				}
+				if existing.OrderID != updated.ID {
+					return ErrPaymentHashAlreadyClaimed
+				}
+				if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", updated.ID).First(&updated).Error; err != nil {
+					return err
+				}
+				if PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) {
+					alreadyClaimed = true
+					return nil
+				}
+				return fmt.Errorf("%w: existing order claim does not match transaction hash", ErrPaymentHashAlreadyClaimed)
+			}
+
+			return applyClaimedPaymentConfirmation(tx, &updated, payment)
+		})
+		if err == nil {
+			*order = updated
+			return alreadyClaimed, nil
+		}
+		if !shouldRetryPaymentClaimSQLiteBusy(err) || attempt == paymentClaimSQLiteBusyMaxAttempts-1 {
+			return false, err
+		}
+		time.Sleep(time.Duration(attempt+1) * paymentClaimSQLiteBusyRetryDelay)
 	}
 
-	*order = updated
-	return alreadyClaimed, nil
+	return false, err
 }

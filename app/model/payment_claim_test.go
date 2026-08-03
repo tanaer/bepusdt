@@ -2,12 +2,15 @@ package model
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	gosqlite "github.com/glebarez/go-sqlite"
 	"github.com/shopspring/decimal"
+	sqlite3 "modernc.org/sqlite/lib"
 )
 
 func TestClaimPaymentConfirmationPreventsHashReuseAndIsIdempotent(t *testing.T) {
@@ -348,6 +351,90 @@ func TestClaimPaymentConfirmationProtectsLegacyRawSolanaClaimWithoutOrder(t *tes
 	if !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
 		t.Fatalf("legacy raw Solana claim error = %v, want ErrPaymentHashAlreadyClaimed", err)
 	}
+}
+
+func TestShouldNotRetryPaymentClaimForeignCodedError(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		code int
+		want bool
+	}{
+		{name: "busy", code: 5, want: false},
+		{name: "busy snapshot", code: 517, want: false},
+		{name: "constraint", code: 19, want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := fmt.Errorf("wrapped SQLite error: %w", paymentClaimTestSQLiteError{code: tc.code})
+			if got := shouldRetryPaymentClaimSQLiteBusy(err); got != tc.want {
+				t.Fatalf("should retry error code %d = %t, want %t", tc.code, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldRetryPaymentClaimSQLiteBusyError(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newPaymentClaimTestOrder("sqlite-busy-claim", now)
+	if err := Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	stale := Db.Begin()
+	if stale.Error != nil {
+		t.Fatalf("begin stale transaction: %v", stale.Error)
+	}
+	defer stale.Rollback()
+	var read Order
+	if err := stale.First(&read, order.ID).Error; err != nil {
+		t.Fatalf("read order in stale transaction: %v", err)
+	}
+
+	writer := Db.Begin()
+	if writer.Error != nil {
+		t.Fatalf("begin writer transaction: %v", writer.Error)
+	}
+	if err := writer.Create(&PaymentHashClaim{Hash: "sqlite-busy-existing", OrderID: order.ID}).Error; err != nil {
+		writer.Rollback()
+		t.Fatalf("create competing payment claim: %v", err)
+	}
+	if err := writer.Commit().Error; err != nil {
+		t.Fatalf("commit competing payment claim: %v", err)
+	}
+
+	err := stale.Create(&PaymentHashClaim{Hash: "sqlite-busy-stale", OrderID: order.ID + 1}).Error
+	if err == nil {
+		t.Fatal("stale transaction write unexpectedly succeeded")
+	}
+	var sqliteErr *gosqlite.Error
+	if !errors.As(err, &sqliteErr) {
+		t.Fatalf("stale transaction error type = %T, want wrapped *go-sqlite.Error", err)
+	}
+	if sqliteErr.Code()&0xff != sqlite3.SQLITE_BUSY {
+		t.Fatalf("stale transaction error code = %d, want SQLite BUSY primary code", sqliteErr.Code())
+	}
+	if !shouldRetryPaymentClaimSQLiteBusy(err) {
+		t.Fatalf("should retry actual SQLite busy error = false, error: %v", err)
+	}
+}
+
+type paymentClaimTestSQLiteError struct {
+	code int
+}
+
+func (err paymentClaimTestSQLiteError) Error() string {
+	return "SQLite test error"
+}
+
+func (err paymentClaimTestSQLiteError) Code() int {
+	return err.code
 }
 
 func newPaymentClaimTestOrder(tradeID string, now time.Time) Order {
