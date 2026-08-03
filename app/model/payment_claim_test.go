@@ -163,6 +163,17 @@ func TestMarkConfirmingClaimsPaymentHash(t *testing.T) {
 	if first.Status != OrderStatusConfirming || first.RefHash != hash {
 		t.Fatalf("first order confirmation = %+v, want claimed payment", first)
 	}
+	claimHash, err := paymentHashClaimKey(first.TradeType, hash)
+	if err != nil {
+		t.Fatalf("build payment claim key: %v", err)
+	}
+	var claim PaymentHashClaim
+	if err := Db.First(&claim, "hash = ?", claimHash).Error; err != nil {
+		t.Fatalf("load durable payment claim: %v", err)
+	}
+	if claim.Hash != claimHash || claim.OrderID != first.ID {
+		t.Fatalf("payment claim = %+v, want hash %q owned by order %d", claim, claimHash, first.ID)
+	}
 
 	if err := second.MarkConfirming(100, "sender", hash, now.Add(time.Second), decimal.RequireFromString("65.94")); !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
 		t.Fatalf("mark second order confirming error = %v, want ErrPaymentHashAlreadyClaimed", err)
