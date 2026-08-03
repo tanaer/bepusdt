@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/base58"
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cast"
 	"github.com/tidwall/gjson"
@@ -70,6 +71,9 @@ func verifySubmittedPayment(ctx context.Context, order model.Order, hash string,
 	if err != nil {
 		return transfer{}, err
 	}
+	if !model.IsAmountValid(payment.TradeType, payment.Amount) {
+		return transfer{}, fmt.Errorf("%w: invalid amount", ErrSubmittedPaymentDoesNotMatch)
+	}
 	if !sameSubmittedPaymentHash(order.TradeType, payment.TxHash, normalizedHash) {
 		return transfer{}, fmt.Errorf("%w: lookup returned a different transaction", ErrSubmittedPaymentDoesNotMatch)
 	}
@@ -95,6 +99,12 @@ func normalizeSubmittedPaymentHash(tradeType model.TradeType, hash string) (stri
 			return "", ErrInvalidSubmittedPaymentHash
 		}
 		return "0x" + strings.TrimPrefix(strings.ToLower(hash), "0x"), nil
+	case isSolanaTrade(tradeType):
+		decoded := base58.Decode(hash)
+		if len(decoded) != 64 || base58.Encode(decoded) != hash {
+			return "", ErrInvalidSubmittedPaymentHash
+		}
+		return hash, nil
 	default:
 		return "", ErrUnsupportedSubmittedPayment
 	}
@@ -131,9 +141,44 @@ func lookupSubmittedPayment(ctx context.Context, order model.Order, hash string)
 		return lookupTronSubmittedPayment(ctx, order, hash)
 	case isBscTrade(order.TradeType):
 		return lookupBscSubmittedPayment(ctx, order, hash)
+	case isSolanaTrade(order.TradeType):
+		return lookupSolanaSubmittedPayment(ctx, order, hash)
 	default:
 		return transfer{}, ErrUnsupportedSubmittedPayment
 	}
+}
+
+func lookupSolanaSubmittedPayment(ctx context.Context, order model.Order, hash string) (transfer, error) {
+	result, err := sol.rpc(ctx, "getTransaction", []any{
+		hash,
+		map[string]any{
+			"encoding":                       "jsonParsed",
+			"commitment":                     "finalized",
+			"maxSupportedTransactionVersion": 0,
+		},
+	})
+	if err != nil {
+		return transfer{}, fmt.Errorf("query Solana transaction: %w", err)
+	}
+	if !result.Exists() || result.Raw == "null" || result.Get("slot").Int() <= 0 || result.Get("blockTime").Int() <= 0 {
+		return transfer{}, ErrSubmittedPaymentNotFound
+	}
+	if metaErr := result.Get("meta.err"); metaErr.Exists() && metaErr.Raw != "null" {
+		return transfer{}, ErrSubmittedPaymentNotFound
+	}
+
+	for _, payment := range parseSolanaParsedTransfers(result) {
+		payment.TxHash = hash
+		if !model.IsAmountValid(payment.TradeType, payment.Amount) {
+			continue
+		}
+		if orderTransferMatchReason(order, payment) != orderMatchOK {
+			continue
+		}
+		return payment, nil
+	}
+
+	return transfer{}, ErrSubmittedPaymentDoesNotMatch
 }
 
 func lookupTronSubmittedPayment(ctx context.Context, order model.Order, hash string) (transfer, error) {

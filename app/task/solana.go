@@ -529,8 +529,14 @@ func (s *solana) reconcileOrderTokenAccount(ctx context.Context, order model.Ord
 				continue
 			}
 
-			if err := order.MarkConfirming(t.BlockNum, t.FromAddress, t.TxHash, t.Timestamp, t.Amount); err != nil {
-				log.Task.Warn("solana reconcile mark order confirming failed:", err)
+			if _, err := model.ClaimPaymentConfirmation(&order, model.PaymentConfirmation{
+				BlockNum: t.BlockNum,
+				From:     t.FromAddress,
+				Hash:     t.TxHash,
+				At:       t.Timestamp,
+				Amount:   t.Amount,
+			}); err != nil {
+				log.Task.Warn("solana reconcile claim payment confirmation failed:", err)
 				return false
 			}
 

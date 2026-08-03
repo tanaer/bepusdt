@@ -153,6 +153,13 @@ func TestSolanaReconcileWaitingOrdersMarksMatchingOrderConfirming(t *testing.T) 
 	if got := refreshed.ConfirmedAt.Unix(); got != blockTime {
 		t.Fatalf("expected confirmed_at unix %d, got %d", blockTime, got)
 	}
+	var claim model.PaymentHashClaim
+	if err := model.Db.Where("order_id = ?", order.ID).First(&claim).Error; err != nil {
+		t.Fatalf("load payment hash claim: %v", err)
+	}
+	if claim.Hash != testSolanaTxHash {
+		t.Fatalf("payment hash claim = %q, want %q", claim.Hash, testSolanaTxHash)
+	}
 }
 
 func initSolanaReconcileTestLog(t *testing.T) {
