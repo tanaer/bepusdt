@@ -92,6 +92,134 @@
         el._t = setTimeout(function () { el.classList.remove('show'); }, 3000);
     }
 
+    function canVerifyTransactionHash() {
+        return cfg && cfg.can_verify_transaction_hash === true;
+    }
+
+    function setTransactionHashStatus(statusEl, message, state) {
+        if (!statusEl) return;
+        statusEl.textContent = message;
+        statusEl.className = 'transaction-hash-status is-visible is-' + state;
+    }
+
+    function transactionHashErrorMessage(response) {
+        var errorCode = response && response.error_code ? response.error_code : '';
+        var fallback = (response && response.message) || t('transactionHashNetworkError', '网络异常，请稍后重试');
+        return t('transactionHashErrors.' + errorCode, fallback);
+    }
+
+    function submitTransactionHash(input, button, statusEl) {
+        var txHash = input && input.value ? input.value.trim() : '';
+        if (!txHash) {
+            setTransactionHashStatus(statusEl, t('transactionHashRequired', '请输入交易哈希'), 'error');
+            if (input) input.focus();
+            return;
+        }
+
+        var defaultLabel = button.dataset.defaultLabel || t('transactionHashSubmit', '提交验证');
+        button.disabled = true;
+        button.textContent = t('transactionHashSubmitting', '正在验证链上交易…');
+        setTransactionHashStatus(statusEl, t('transactionHashSubmitting', '正在验证链上交易…'), 'success');
+
+        fetch('/api/v1/pay/verify-transaction', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trade_id: tradeId, tx_hash: txHash })
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (res) {
+                if (res.status_code === 200) {
+                    setTransactionHashStatus(statusEl, t('transactionHashVerified', '交易已提交确认，请稍候…'), 'success');
+                    input.disabled = true;
+                    var timeoutModal = document.getElementById('timeoutModal');
+                    if (timeoutModal && timeoutModal.parentNode) timeoutModal.parentNode.removeChild(timeoutModal);
+                    checkStatus();
+                    return;
+                }
+                setTransactionHashStatus(statusEl, transactionHashErrorMessage(res), 'error');
+                button.disabled = false;
+                button.textContent = defaultLabel;
+            })
+            .catch(function () {
+                setTransactionHashStatus(statusEl, t('transactionHashNetworkError', '网络异常，请稍后重试'), 'error');
+                button.disabled = false;
+                button.textContent = defaultLabel;
+            });
+    }
+
+    function bindTransactionHashForm(form) {
+        if (!form || form.dataset.bound) return;
+        var input = form.querySelector('.transaction-hash-input');
+        var button = form.querySelector('.transaction-hash-submit');
+        var statusEl = form.querySelector('.transaction-hash-status');
+        if (!input || !button || !statusEl) return;
+
+        button.dataset.defaultLabel = button.textContent || t('transactionHashSubmit', '提交验证');
+        form.dataset.bound = '1';
+        form.addEventListener('submit', function (event) {
+            event.preventDefault();
+            submitTransactionHash(input, button, statusEl);
+        });
+    }
+
+    function configureTransactionHashForm() {
+        var form = document.getElementById('transactionHashForm');
+        if (!form) return;
+        if (!canVerifyTransactionHash()) {
+            form.style.display = 'none';
+            return;
+        }
+        form.style.display = 'block';
+        bindTransactionHashForm(form);
+    }
+
+    function createTransactionHashForm(id) {
+        var form = document.createElement('form');
+        form.id = id;
+        form.className = 'transaction-hash-form transaction-hash-form-modal';
+        form.noValidate = true;
+
+        var copy = document.createElement('div');
+        copy.className = 'transaction-hash-copy';
+        var title = document.createElement('p');
+        title.className = 'transaction-hash-title';
+        title.textContent = t('transactionHashTitle', '已付款但未到账？');
+        var hint = document.createElement('p');
+        hint.className = 'transaction-hash-hint';
+        hint.textContent = t('timeoutHashHint', '若您已在到期前付款，可提交交易哈希继续验证。');
+        copy.appendChild(title);
+        copy.appendChild(hint);
+
+        var controls = document.createElement('div');
+        controls.className = 'transaction-hash-controls';
+        var input = document.createElement('input');
+        input.id = id + 'Input';
+        input.className = 'transaction-hash-input';
+        input.type = 'text';
+        input.autocomplete = 'off';
+        input.autocapitalize = 'off';
+        input.spellcheck = false;
+        input.placeholder = t('transactionHashPlaceholder', '粘贴 Transaction Hash');
+        var button = document.createElement('button');
+        button.className = 'transaction-hash-submit';
+        button.type = 'submit';
+        button.textContent = t('transactionHashSubmit', '提交验证');
+        controls.appendChild(input);
+        controls.appendChild(button);
+
+        var statusEl = document.createElement('p');
+        statusEl.className = 'transaction-hash-status';
+        statusEl.setAttribute('aria-live', 'polite');
+        input.setAttribute('aria-describedby', id + 'Status');
+        statusEl.id = id + 'Status';
+
+        form.appendChild(copy);
+        form.appendChild(controls);
+        form.appendChild(statusEl);
+        bindTransactionHashForm(form);
+        return form;
+    }
+
     function copyText(text, msg, iconEl, sm) {
         if (!text) return;
         var sz = sm ? 14 : 16;
@@ -450,6 +578,12 @@
             '<a href="' + ret + '" class="return-btn">' + t('returnBtn', '返回商户平台') + '</a>' +
             '</div></div>';
         document.body.appendChild(ov);
+        if (canVerifyTransactionHash()) {
+            var modalBody = ov.querySelector('.modal-body');
+            var returnButton = modalBody ? modalBody.querySelector('.return-btn') : null;
+            var timeoutForm = createTransactionHashForm('timeoutTransactionHashForm');
+            if (modalBody && returnButton) modalBody.insertBefore(timeoutForm, returnButton);
+        }
     }
 
     function createTransaction() {
@@ -512,6 +646,7 @@
         initQrPage: function (config) {
             cfg = config || {};
             tradeId = cfg.trade_id;
+            configureTransactionHashForm();
             startCountdown(document.getElementById('timerDisplayQ'), parseInt(cfg.expired_at) || 0, parseInt(cfg.created_at) || 0, showTimeout);
             startStatusCheck();
             var caBtn = document.getElementById('copyAmountQBtn');
@@ -593,7 +728,8 @@
             created_at: d.created_at,
             trade_id: d.trade_id,
             return_url: d.redirect_url,
-            status: d.status
+            status: d.status,
+            can_verify_transaction_hash: d.can_verify_transaction_hash === true
         });
     }
 

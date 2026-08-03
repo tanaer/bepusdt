@@ -198,6 +198,17 @@
             选错了付款方式？返回重选
         </button>
     </div>
+    <form id="transactionHashForm" class="transaction-hash-form" style="display:none;" novalidate>
+        <div class="transaction-hash-copy">
+            <p class="transaction-hash-title" data-i18n="transactionHashTitle">已付款但未到账？</p>
+            <p class="transaction-hash-hint" data-i18n="transactionHashHint">提交交易哈希以验证本次付款</p>
+        </div>
+        <div class="transaction-hash-controls">
+            <input id="transactionHashInput" class="transaction-hash-input" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" data-i18n="[placeholder]transactionHashPlaceholder" placeholder="粘贴 Transaction Hash" aria-describedby="transactionHashStatus">
+            <button id="transactionHashSubmit" class="transaction-hash-submit" type="submit" data-i18n="transactionHashSubmit">提交验证</button>
+        </div>
+        <p id="transactionHashStatus" class="transaction-hash-status" aria-live="polite"></p>
+    </form>
     <div class="card-footer">
         <div class="footer-powered">
             <span data-i18n="poweredBy">Powered by</span><a href="https://github.com/v03413/BEpusdt" target="_blank">BEpusdt</a>

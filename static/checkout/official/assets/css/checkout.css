@@ -627,6 +627,81 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 .confirming-note { font-size: 13px; color: var(--color-text-muted); margin-top: 12px; }
 
+.transaction-hash-form {
+    margin: 16px 24px 0;
+    padding: 14px 0 2px;
+    border-top: 1px solid var(--color-border);
+}
+.transaction-hash-copy { margin-bottom: 10px; }
+.transaction-hash-title {
+    color: var(--color-text-primary);
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.35;
+}
+.transaction-hash-hint {
+    color: var(--color-text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+    margin-top: 3px;
+}
+.transaction-hash-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+}
+.transaction-hash-input {
+    min-width: 0;
+    border: 1.5px solid var(--color-border);
+    border-radius: 10px;
+    color: var(--color-text-primary);
+    font-size: 12px;
+    outline: none;
+    padding: 10px 11px;
+    transition: border-color .18s ease, box-shadow .18s ease;
+}
+.transaction-hash-input::placeholder { color: var(--color-text-muted); }
+.transaction-hash-input:focus {
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgba(0, 178, 106, .12);
+}
+.transaction-hash-submit {
+    align-items: center;
+    background: var(--color-btn);
+    border: 0;
+    border-radius: 10px;
+    color: #fff;
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 12px;
+    font-weight: 700;
+    justify-content: center;
+    padding: 0 13px;
+    transition: background .18s ease, opacity .18s ease, transform .18s ease;
+}
+.transaction-hash-submit:hover:not(:disabled) { background: var(--color-btn-hover); transform: translateY(-1px); }
+.transaction-hash-submit:disabled { cursor: wait; opacity: .58; }
+.transaction-hash-status {
+    display: none;
+    font-size: 12px;
+    line-height: 1.45;
+    margin-top: 8px;
+}
+.transaction-hash-status.is-visible { display: block; }
+.transaction-hash-status.is-success { color: #008451; }
+.transaction-hash-status.is-error { color: #c93737; }
+.transaction-hash-form-modal {
+    border-top: 0;
+    margin: 18px 0 0;
+    padding: 0;
+    text-align: left;
+}
+
+@media (max-width: 400px) {
+    .transaction-hash-controls { grid-template-columns: 1fr; }
+    .transaction-hash-submit { min-height: 38px; }
+}
+
 @media (max-width: 520px) {
     body { padding: 12px 10px 32px; }
     .checkout-card { margin-top: 0; }
