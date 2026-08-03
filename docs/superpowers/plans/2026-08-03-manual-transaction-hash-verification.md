@@ -42,7 +42,7 @@ Expected: FAIL，原因是能力函数或 JSON 字段不存在。
 
 - [ ] **Step 3: 实现最小能力函数和接口字段**
 
-在 app/task/payment_verification.go 导出 SupportsSubmittedPaymentVerification(tradeType model.TradeType) bool，只接受 TRON、BSC、Solana 三类精确白名单。Info 调用该函数并写入 can_verify_transaction_hash。保持其他接口兼容。
+在 app/task/payment_verification.go 导出 SupportsSubmittedPaymentVerification(tradeType model.TradeType) bool，只接受 TRON、BSC、Solana 三类精确白名单。Info 调用该函数并写入 can_verify_transaction_hash。VerifyTransaction 在幂等判断之前调用它，并拒绝所有不支持的类型。保持其他接口兼容。
 
 - [ ] **Step 4: 运行针对性测试，确认通过**
 
@@ -61,6 +61,8 @@ Run:
 **Files:**
 
 - Modify: app/task/payment_verification.go
+- Modify: app/task/solana.go
+- Modify: app/task/solana_reconcile_test.go
 - Modify: app/task/payment_verification_test.go
 
 - [ ] **Step 1: 写 Solana 哈希规范化的失败测试**
@@ -85,7 +87,7 @@ Expected: PASS。
 
 - [ ] **Step 5: 写 getTransaction 的失败测试**
 
-用 httptest.Server 模拟 Solana RPC。测试必须断言请求使用 getTransaction、jsonParsed、finalized 和 maxSupportedTransactionVersion: 0。返回一笔 transferChecked USDC 交易，包含 source/destination Token Account、pre/post balances、slot 与 blockTime。断言返回收款钱包 owner、付款钱包、金额、slot、时间和原始签名。再写 result: null、meta.err、错误 mint、错误收款 owner、错误金额、超出时间窗、第一笔转账不匹配而第二笔匹配的测试。
+用 httptest.Server 模拟 Solana RPC。测试必须断言请求使用 getTransaction、jsonParsed、finalized 和 maxSupportedTransactionVersion: 0。返回一笔 transferChecked USDC 交易，包含 source/destination Token Account、pre/post balances、slot 与 blockTime。fixture 必须让 multisigAuthority 或 authority 与 Token Account owner 不同。断言返回收款钱包 owner、付款钱包、金额、slot、时间和原始签名。再写 result: null、meta.err、错误 mint、错误收款 owner、错误金额、超出时间窗、第一笔转账不匹配而第二笔匹配的测试。
 
 - [ ] **Step 6: 运行查询测试，确认缺少 Solana 查询分支而失败**
 
@@ -95,7 +97,7 @@ Expected: FAIL，当前逻辑返回 ErrUnsupportedSubmittedPayment。
 
 - [ ] **Step 7: 实现 Solana 查询和逐笔匹配**
 
-在 lookupSubmittedPayment 增加 Solana 分支。使用现有 sol.rpc 查询 getTransaction。拒绝空结果、执行失败、无 slot 或无 blockTime 的交易。复用 parseSolanaParsedTransfers，为每笔解析结果补入用户原始签名，过滤交易类型、金额范围和 orderTransferMatchReason；返回第一笔真正匹配订单的转账。没有匹配时返回 ErrSubmittedPaymentDoesNotMatch。
+在 lookupSubmittedPayment 增加 Solana 分支。使用现有 sol.rpc 查询 getTransaction。拒绝空结果、执行失败、无 slot 或无 blockTime 的交易。复用 parseSolanaParsedTransfers，为每笔解析结果补入用户原始签名，过滤交易类型、金额范围和 orderTransferMatchReason；返回第一笔真正匹配订单的转账。没有匹配时返回 ErrSubmittedPaymentDoesNotMatch。将 Solana 回查的 MarkConfirming 改为 ClaimPaymentConfirmation，并在现有回查测试中断言 PaymentHashClaim 被创建。
 
 - [ ] **Step 8: 在通用验证路径增加金额范围保护**
 
@@ -134,7 +136,7 @@ Expected: FAIL，大小写变体被错误视为相同签名。
 
 - [ ] **Step 3: 实现按交易类型的比较与认领键**
 
-在 model 中封装按 trade type 的哈希相等函数：Solana 使用精确比较，TRON/EVM 使用大小写不敏感比较。对 Solana PaymentHashClaim.Hash 使用基于解码签名字节的、可逆且小于 128 字符的 canonical key；订单 RefHash 继续保存原始 Base58 字符串。旧订单表的冲突检查对 Solana 使用字节敏感比较。
+在 model 中封装按 trade type 的哈希相等函数：Solana 使用精确比较，TRON 去除可选 0x 前缀后小写比较，BSC 去除可选前缀、小写并补回 0x 后比较。对 Solana PaymentHashClaim.Hash 使用基于解码签名字节的小写、无填充 Base32 canonical key；订单 RefHash 继续保存原始 Base58 字符串。旧订单表的冲突检查对 Solana 使用字节敏感比较。
 
 - [ ] **Step 4: 将 HTTP 幂等判断改为共享比较函数**
 
@@ -161,7 +163,7 @@ Run:
 
 - [ ] **Step 1: 写失败测试**
 
-让 handler 的替身验证器分别返回无效 Hash、不支持网络、未找到交易、不匹配、已被认领、不可接收订单和 RPC 错误。断言 JSON 响应保留 status_code: 400、保留兼容 message，并在顶层返回相应 error_code。
+让 handler 的替身验证器分别返回无效 Hash、不支持网络、未找到交易、不匹配、已被认领、不可接收订单和 RPC 错误。另测请求绑定失败、订单不存在和订单不可接收的直接失败分支。断言 JSON 响应保留 status_code: 400、保留兼容 message，并在顶层返回相应 error_code。
 
 - [ ] **Step 2: 运行测试，确认响应中没有 error_code**
 
@@ -171,7 +173,7 @@ Expected: FAIL，错误响应中没有稳定错误码。
 
 - [ ] **Step 3: 实现验证错误响应和结构化日志**
 
-增加只供验单接口使用的失败响应帮助函数。将已知错误映射为设计文档定义的错误码；未知错误映射为 verification_unavailable，并记录 trade_id、trade_type、tx_hash、错误码和验证耗时。成功也记录结构化成功日志。不要改变其他 Epusdt API 的响应格式。
+增加只供验单接口使用的失败响应帮助函数。将已知错误映射为设计文档定义的错误码；未知错误映射为 verification_unavailable。所有 VerifyTransaction 失败分支都使用此帮助函数。成功和失败日志均记录 trade_id、trade_type、tx_hash、result、error_code、rpc_duration_ms；日志调用必须 nil-safe。不要改变其他 Epusdt API 的响应格式。
 
 - [ ] **Step 4: 运行 handler 测试，确认通过**
 
@@ -260,3 +262,11 @@ Expected: 无空白错误、无未提交文件，提交只包含设计、后端�
 Run: git push -u fork feat/manual-transaction-hash-verification
 
 Expected: fork 上出现同名分支，供创建第二个中文 PR。
+
+- [ ] **Step 6: 提交完成记录**
+
+Run:
+  git add docs/superpowers/specs/2026-08-03-manual-transaction-hash-verification-design.md docs/superpowers/plans/2026-08-03-manual-transaction-hash-verification.md
+  git commit -m "docs(payment): record verification implementation"
+
+Expected: 完成记录随分支一并推送，最终工作区干净。

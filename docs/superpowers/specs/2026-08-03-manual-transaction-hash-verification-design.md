@@ -20,6 +20,8 @@
 
 接口不得直接将订单改为成功，也不得直接调用商户回调。这样自动扫描、回查和用户提交哈希三个入口共享同一份认领和确认语义。
 
+接口在执行幂等判断前先检查支付类型是否支持手动验单。未支持的链始终返回 `unsupported_network`，即使订单已经是确认中或成功状态，避免旧交易哈希绕过白名单。
+
 ## Solana 验证
 
 Solana 签名是大小写敏感的 Base58 字符串。输入仅去除首尾空白，随后必须 Base58 解码为 64 字节，并保持原始大小写。系统不得添加 `0x`、转小写或使用不区分大小写的比较。
@@ -55,6 +57,10 @@ TRON 和 EVM/BSC 哈希继续沿用规范化后的十六进制大小写不敏感
 
 数据库继续保存 Solana 的原始 Base58 签名。若 MySQL 的默认排序规则不区分大小写，Solana 的 claim 键必须使用字节安全的规范化存储，以避免两个不同大小写签名冲突。
 
+TRON 哈希去除可选 `0x` 前缀并转小写；BSC 哈希去除可选前缀、转小写后统一添加 `0x`。幂等判断和认领键必须使用这两个规范化结果，保证用户以等价的前缀形式重试时仍然幂等。
+
+Solana 自动回查、自动扫描和用户提交哈希都必须使用 `ClaimPaymentConfirmation`，不得调用 `MarkConfirming` 绕过持久化交易认领。
+
 ## UI 与接口契约
 
 `/api/v1/pay/info` 返回 `can_verify_transaction_hash`。该字段由后端根据同一份支持白名单计算，前端不得自行维护链和币种白名单。
@@ -83,9 +89,13 @@ TRON 和 EVM/BSC 哈希继续沿用规范化后的十六进制大小写不敏感
 }
 ```
 
+请求格式错误使用 `invalid_hash`；订单不存在或当前状态不可接收使用 `order_not_receivable`。所有 `VerifyTransaction` 的失败分支都返回顶层 `error_code`。
+
 ## 可追溯性
 
 每次验证请求记录结构化日志：订单交易号、交易类型、提交哈希、结果、错误代码和 RPC 耗时。此版本不引入新的数据库审计表。成功记录由订单字段和 `PaymentHashClaim` 持久化。
+
+日志字段固定为 `trade_id`、`trade_type`、`tx_hash`、`result`、`error_code` 和 `rpc_duration_ms`。handler 的日志调用必须允许测试环境尚未初始化日志对象。
 
 ## 测试要求
 
@@ -97,7 +107,10 @@ TRON 和 EVM/BSC 哈希继续沿用规范化后的十六进制大小写不敏感
 - `result: null`、交易失败、错误 mint、错误收款地址、错误金额、错误时间窗口和重复哈希；
 - 同一笔交易中第一个转账不匹配、后一个转账匹配；
 - 多签 `transferChecked` 的付款方与收款 owner 解析；
+- inner instruction 和多签场景中，`authority` 与 Token Account owner 不同仍能正确验证；
 - TRON 和 BSC 保持既有验单能力；
+- TRON/BSC 带或不带 `0x` 前缀的等价重试保持幂等；
+- 自动回查和手动验单竞争同一 Solana 签名时只有一个订单可认领；
 - `can_verify_transaction_hash` 只对允许的交易类型为真；
 - 官方模板仅对支持支付方式显示表单，并展示准确的失败原因。
 - 订单超时后，支持类型的提交控件仍可点击并发送验单请求。
