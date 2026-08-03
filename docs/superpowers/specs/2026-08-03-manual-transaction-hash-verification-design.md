@@ -69,9 +69,11 @@ TRON 和 EVM/BSC 哈希继续沿用规范化后的十六进制大小写不敏感
 
 TRON 哈希去除可选 `0x` 前缀并转小写；BSC 哈希去除可选前缀、转小写后统一添加 `0x`。幂等判断和认领键必须使用这两个规范化结果，保证用户以等价的前缀形式重试时仍然幂等。
 
-Solana 自动回查、自动扫描和用户提交哈希都必须使用 `ClaimPaymentConfirmation`，不得调用 `MarkConfirming` 绕过持久化交易认领。
+Solana 自动回查、自动扫描和用户提交哈希都必须使用 `ClaimPaymentConfirmation`，不得绕过持久化交易认领。为兼容旧调用而保留的 `MarkConfirming` 也会委托同一认领流程，不能再直接保存订单。
 
 在嵌入式 SQLite 部署中，两个并发入口可能同时读取旧快照并竞争写入认领记录。仅当底层真实 SQLite 驱动返回 `SQLITE_BUSY`（包括扩展码）时，`ClaimPaymentConfirmation` 最多完整重跑三次事务；每一轮都会重新读取订单、旧认领和唯一键。MySQL、PostgreSQL、业务冲突和其他数据库错误不走此重试分支。这样竞争失败方会重新观察到已认领记录并返回既有的幂等或“交易已被使用”语义，而不会把暂态 SQLite 锁错误暴露为验单失败。
+
+认领归属不能依赖 SQL `INSERT ... ON CONFLICT/ON DUPLICATE` 的 `RowsAffected`：不同方言和 MySQL 的 `clientFoundRows` 配置对此值有不同语义。系统会在插入前检查已有 claim，并在每次插入后无条件重新读取 claim 的 `OrderID`；只有它属于当前订单时，才允许把订单推进到 `confirming`。因此遗留或孤立的 claim 也继续保留交易唯一性，而不会被再次入账。
 
 SQLite 的过期转换还会在同一条条件更新中比较当前数据库里的实际失效时间，而不是相信内存中的旧 `ExpiredAt`。这可防止重选支付方式已延长有效期后，旧过期扫描将订单误标为过期。
 

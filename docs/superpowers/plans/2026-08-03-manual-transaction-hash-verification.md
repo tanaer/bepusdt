@@ -15,6 +15,7 @@
 - 已完成 TRON、BSC 与 Solana 的受控手动验单入口、稳定错误码、双语官方收银台界面以及交易级唯一认领。
 - 按审查结论补充了 Solana 内层指令、多签 Token Account owner、错误 mint / 金额 / 时间窗和“自动回查与手动验单竞争同一签名”的回归测试。
 - 嵌入式 SQLite 的竞争认领会对真实 `SQLITE_BUSY` 完整重跑事务（首次加最多两次重试）；自定义或其他数据库错误不会被误判为可重试。
+- 交易哈希认领不依赖跨方言不一致的 `RowsAffected` 语义：插入前后均读取 claim 所属订单，覆盖 MySQL `clientFoundRows` 及遗留孤立 claim 的重复入账风险。
 - 补齐验单与订单重选、取消、过期、成功/失败确认之间的并发语义：链上验证快照必须匹配最终认领时的支付条款；所有可竞争的状态转移均以数据库当前状态为条件更新，旧对象不会覆盖已认领的收款哈希、付款地址或确认时间；过期转换还会重新比较数据库中的失效时间。
 - 本次交付前的验证：`go test ./... -count=1`、`go test -race ./app/model ./app/task -run 'Test(SolanaReconcileAndManualVerificationClaimOneOrder|ClaimPaymentConfirmation|ShouldRetryPaymentClaim)' -count=1`、生产构建、JavaScript 语法和两份 locale JSON 均通过。
 

@@ -198,19 +198,18 @@ func (o *Order) SetFailed() error {
 	return nil
 }
 
+// MarkConfirming is retained for compatibility. All confirmation paths must
+// reserve the transaction hash first, so delegate to the shared claim flow
+// rather than saving a stale order object directly.
 func (o *Order) MarkConfirming(blockNum int, from, hash string, at time.Time, amount decimal.Decimal) error {
-	o.FromAddress = from
-	o.ConfirmedAt = &at
-	o.RefHash = hash
-	o.RefBlockNum = blockNum
-	o.Status = OrderStatusConfirming
-	if o.AddressLocked {
-		rate, _ := decimal.NewFromString(o.Rate)
-		o.Amount = amount.String()
-		o.Money = rate.Mul(amount).String()
-	}
-
-	return Db.Save(o).Error
+	_, err := ClaimPaymentConfirmation(o, PaymentConfirmation{
+		BlockNum: blockNum,
+		From:     from,
+		Hash:     hash,
+		At:       at,
+		Amount:   amount,
+	})
+	return err
 }
 
 func (o *Order) SetNotifyState(state int) error {

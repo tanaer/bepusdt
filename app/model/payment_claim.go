@@ -216,6 +216,40 @@ func paymentConfirmationTermsEqual(expected, current Order) bool {
 		expected.ExpiredAt.Equal(current.ExpiredAt)
 }
 
+func findPaymentHashClaim(tx *gorm.DB, hash string) (PaymentHashClaim, bool, error) {
+	var claim PaymentHashClaim
+	err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
+		Where("hash = ?", hash).First(&claim).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return PaymentHashClaim{}, false, nil
+	}
+	if err != nil {
+		return PaymentHashClaim{}, false, err
+	}
+	return claim, true, nil
+}
+
+func resolveExistingPaymentHashClaim(tx *gorm.DB, order *Order, originalHash, claimHash string) (bool, error) {
+	existing, found, err := findPaymentHashClaim(tx, claimHash)
+	if err != nil {
+		return false, err
+	}
+	if !found {
+		return false, nil
+	}
+	if existing.OrderID != order.ID {
+		return false, ErrPaymentHashAlreadyClaimed
+	}
+	if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).
+		Where("id = ?", order.ID).First(order).Error; err != nil {
+		return false, err
+	}
+	if PaymentHashEqual(order.TradeType, order.RefHash, originalHash) {
+		return true, nil
+	}
+	return false, fmt.Errorf("%w: existing order claim does not match transaction hash", ErrPaymentHashAlreadyClaimed)
+}
+
 // ClaimPaymentConfirmation atomically reserves a transaction hash and moves a
 // waiting (or lookback-expired) order into the existing confirming workflow.
 // Repeating a successful claim for the same order is intentionally idempotent.
@@ -265,28 +299,31 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 				}
 			}
 
+			if already, err := resolveExistingPaymentHashClaim(tx, &updated, originalHash, claimHash); err != nil {
+				return err
+			} else if already {
+				alreadyClaimed = true
+				return nil
+			}
+
 			claim := PaymentHashClaim{Hash: claimHash, OrderID: updated.ID}
 			create := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&claim)
 			if create.Error != nil {
 				return create.Error
 			}
-			if create.RowsAffected == 0 {
-				var existing PaymentHashClaim
-				lookupErr := tx.Where("hash = ?", claimHash).First(&existing).Error
-				if lookupErr != nil {
-					return lookupErr
-				}
-				if existing.OrderID != updated.ID {
-					return ErrPaymentHashAlreadyClaimed
-				}
-				if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", updated.ID).First(&updated).Error; err != nil {
-					return err
-				}
-				if PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) {
-					alreadyClaimed = true
-					return nil
-				}
-				return fmt.Errorf("%w: existing order claim does not match transaction hash", ErrPaymentHashAlreadyClaimed)
+			// Do not infer ownership from RowsAffected. MySQL's
+			// clientFoundRows=true reports a duplicate-key no-op update as one
+			// matching row. The post-insert lookup is the authoritative owner
+			// check for every SQL dialect.
+			existing, found, err := findPaymentHashClaim(tx, claimHash)
+			if err != nil {
+				return err
+			}
+			if !found {
+				return fmt.Errorf("claim payment confirmation: payment claim disappeared after insert")
+			}
+			if existing.OrderID != updated.ID {
+				return ErrPaymentHashAlreadyClaimed
 			}
 
 			return applyClaimedPaymentConfirmation(tx, &updated, payment)

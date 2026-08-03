@@ -10,6 +10,7 @@ import (
 
 	gosqlite "github.com/glebarez/go-sqlite"
 	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
 	sqlite3 "modernc.org/sqlite/lib"
 )
 
@@ -50,6 +51,129 @@ func TestClaimPaymentConfirmationPreventsHashReuseAndIsIdempotent(t *testing.T) 
 
 	if _, err := ClaimPaymentConfirmation(&second, payment); !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
 		t.Fatalf("claiming same hash for second order error = %v, want ErrPaymentHashAlreadyClaimed", err)
+	}
+}
+
+func TestClaimPaymentConfirmationRejectsCompetingClaimWhenConflictReportsFoundRow(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	first := newPaymentClaimTestOrder("payment-claim-found-row-first", now)
+	second := newPaymentClaimTestOrder("payment-claim-found-row-second", now)
+	if err := Db.Create(&first).Error; err != nil {
+		t.Fatalf("create first order: %v", err)
+	}
+	if err := Db.Create(&second).Error; err != nil {
+		t.Fatalf("create second order: %v", err)
+	}
+	payment := PaymentConfirmation{
+		BlockNum: 100,
+		From:     "TJ5usJLLwjwn7Pw3TPbdzreG7dvgKzfQ5y",
+		Hash:     "303245E65DA6DCA3E7AED8DC5386CD0CBBC7F67E4C21FF4EE0D9330055A41983",
+		At:       now.Add(time.Second),
+		Amount:   decimal.RequireFromString("65.94"),
+	}
+	claimHash, err := paymentHashClaimKey(second.TradeType, payment.Hash)
+	if err != nil {
+		t.Fatalf("build payment claim key: %v", err)
+	}
+
+	const (
+		injectCompetingClaimCallback = "test:payment_claim_inject_competitor"
+		forceFoundRowsCallback       = "test:payment_claim_force_found_rows"
+	)
+	var injectedCompetingClaim bool
+	if err := Db.Callback().Create().Before("gorm:create").Register(injectCompetingClaimCallback, func(tx *gorm.DB) {
+		if injectedCompetingClaim || tx.Statement.Schema == nil || tx.Statement.Schema.Table != (PaymentHashClaim{}).TableName() {
+			return
+		}
+		// Use Exec so this callback does not recursively invoke the Create
+		// callback chain. The insert runs on the claim transaction itself,
+		// representing another order winning the race immediately before the
+		// attempted insert.
+		quotedTable := tx.Statement.Quote((PaymentHashClaim{}).TableName())
+		result := tx.Exec(
+			"INSERT INTO "+quotedTable+" (hash, order_id, created_at, updated_at) VALUES (?, ?, ?, ?)",
+			claimHash, first.ID, now, now,
+		)
+		if result.Error != nil {
+			tx.AddError(result.Error)
+			return
+		}
+		injectedCompetingClaim = true
+	}); err != nil {
+		t.Fatalf("register competing-claim callback: %v", err)
+	}
+	if err := Db.Callback().Create().After("gorm:create").Register(forceFoundRowsCallback, func(tx *gorm.DB) {
+		if injectedCompetingClaim && tx.Statement.Schema != nil && tx.Statement.Schema.Table == (PaymentHashClaim{}).TableName() {
+			// MySQL with clientFoundRows=true reports a matching duplicate-key
+			// no-op update as one affected row. Reproduce that driver contract
+			// without requiring a MySQL service in the unit suite.
+			tx.RowsAffected = 1
+		}
+	}); err != nil {
+		t.Fatalf("register found-rows callback: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := Db.Callback().Create().Remove(injectCompetingClaimCallback); err != nil {
+			t.Errorf("remove competing-claim callback: %v", err)
+		}
+		if err := Db.Callback().Create().Remove(forceFoundRowsCallback); err != nil {
+			t.Errorf("remove found-rows callback: %v", err)
+		}
+	})
+
+	if _, err := ClaimPaymentConfirmation(&second, payment); !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
+		t.Fatalf("claim with found-row conflict error = %v, want ErrPaymentHashAlreadyClaimed", err)
+	}
+	if !injectedCompetingClaim {
+		t.Fatal("competing claim callback did not run")
+	}
+
+	var refreshed Order
+	if err := Db.First(&refreshed, second.ID).Error; err != nil {
+		t.Fatalf("reload second order: %v", err)
+	}
+	if refreshed.Status != OrderStatusWaiting || refreshed.RefHash != "" {
+		t.Fatalf("second order must remain unclaimed: %+v", refreshed)
+	}
+}
+
+func TestMarkConfirmingClaimsPaymentHash(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	first := newPaymentClaimTestOrder("mark-confirming-first", now)
+	second := newPaymentClaimTestOrder("mark-confirming-second", now)
+	if err := Db.Create(&first).Error; err != nil {
+		t.Fatalf("create first order: %v", err)
+	}
+	if err := Db.Create(&second).Error; err != nil {
+		t.Fatalf("create second order: %v", err)
+	}
+
+	hash := strings.Repeat("a", 64)
+	if err := first.MarkConfirming(100, "sender", hash, now.Add(time.Second), decimal.RequireFromString("65.94")); err != nil {
+		t.Fatalf("mark first order confirming: %v", err)
+	}
+	if first.Status != OrderStatusConfirming || first.RefHash != hash {
+		t.Fatalf("first order confirmation = %+v, want claimed payment", first)
+	}
+
+	if err := second.MarkConfirming(100, "sender", hash, now.Add(time.Second), decimal.RequireFromString("65.94")); !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
+		t.Fatalf("mark second order confirming error = %v, want ErrPaymentHashAlreadyClaimed", err)
+	}
+
+	var refreshed Order
+	if err := Db.First(&refreshed, second.ID).Error; err != nil {
+		t.Fatalf("reload second order: %v", err)
+	}
+	if refreshed.Status != OrderStatusWaiting || refreshed.RefHash != "" {
+		t.Fatalf("second order must remain unclaimed: %+v", refreshed)
 	}
 }
 
