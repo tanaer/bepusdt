@@ -289,6 +289,59 @@ func TestClaimPaymentConfirmationRejectsConflictingClaimForSameOrder(t *testing.
 	}
 }
 
+func TestClaimPaymentConfirmationRejectsOrderWhosePaymentTermsChanged(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	verifiedOrder := newPaymentClaimTestOrder("changed-payment-terms", now)
+	verifiedOrder.TradeType = UsdtBep20
+	verifiedOrder.Address = "0x1111111111111111111111111111111111111111"
+	verifiedOrder.MatchAddress = verifiedOrder.Address
+	if err := Db.Create(&verifiedOrder).Error; err != nil {
+		t.Fatalf("create verified order snapshot: %v", err)
+	}
+
+	if err := Db.Model(&Order{}).Where("id = ?", verifiedOrder.ID).Updates(map[string]any{
+		"trade_type":    UsdcBep20,
+		"crypto":        USDC,
+		"rate":          "6.00",
+		"amount":        "76.93",
+		"address":       "0x2222222222222222222222222222222222222222",
+		"match_address": "0x2222222222222222222222222222222222222222",
+		"expired_at":    now.Add(20 * time.Minute),
+	}).Error; err != nil {
+		t.Fatalf("reselect payment terms: %v", err)
+	}
+
+	_, err := ClaimPaymentConfirmation(&verifiedOrder, PaymentConfirmation{
+		BlockNum: 100,
+		From:     "0x3333333333333333333333333333333333333333",
+		Hash:     strings.Repeat("a", 64),
+		At:       now.Add(time.Second),
+		Amount:   decimal.RequireFromString("65.94"),
+	})
+	if !errors.Is(err, ErrOrderNoLongerReceivable) {
+		t.Fatalf("claim after payment terms changed error = %v, want ErrOrderNoLongerReceivable", err)
+	}
+
+	var refreshed Order
+	if err := Db.First(&refreshed, verifiedOrder.ID).Error; err != nil {
+		t.Fatalf("reload reselected order: %v", err)
+	}
+	if refreshed.Status != OrderStatusWaiting || refreshed.RefHash != "" {
+		t.Fatalf("reselected order must remain unclaimed: %+v", refreshed)
+	}
+	var claimCount int64
+	if err := Db.Model(&PaymentHashClaim{}).Where("order_id = ?", verifiedOrder.ID).Count(&claimCount).Error; err != nil {
+		t.Fatalf("count payment claims: %v", err)
+	}
+	if claimCount != 0 {
+		t.Fatalf("payment claim count = %d, want 0", claimCount)
+	}
+}
+
 func TestApplyClaimedPaymentConfirmationDoesNotOverwriteNonReceivableOrder(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
 		t.Fatalf("initialize test database: %v", err)

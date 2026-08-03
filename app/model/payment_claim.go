@@ -200,6 +200,22 @@ func shouldRetryPaymentClaimSQLiteBusy(err error) bool {
 	return sqliteErr.Code()&0xff == sqlite3.SQLITE_BUSY
 }
 
+// paymentConfirmationTermsEqual prevents a transfer verified against one
+// payment method from being applied after the waiting order was reselected to
+// another method while the chain RPC request was in flight.
+func paymentConfirmationTermsEqual(expected, current Order) bool {
+	return expected.TradeType == current.TradeType &&
+		expected.Crypto == current.Crypto &&
+		expected.Fiat == current.Fiat &&
+		expected.Rate == current.Rate &&
+		expected.Amount == current.Amount &&
+		expected.Money == current.Money &&
+		expected.Address == current.Address &&
+		expected.MatchAddress == current.MatchAddress &&
+		expected.AddressLocked == current.AddressLocked &&
+		expected.ExpiredAt.Equal(current.ExpiredAt)
+}
+
 // ClaimPaymentConfirmation atomically reserves a transaction hash and moves a
 // waiting (or lookback-expired) order into the existing confirming workflow.
 // Repeating a successful claim for the same order is intentionally idempotent.
@@ -212,6 +228,7 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 	if originalHash == "" {
 		return false, fmt.Errorf("claim payment confirmation: transaction hash is required")
 	}
+	expectedOrder := *order
 
 	for attempt := 0; attempt < paymentClaimSQLiteBusyMaxAttempts; attempt++ {
 		var updated Order
@@ -219,6 +236,9 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 		err = Db.Transaction(func(tx *gorm.DB) error {
 			if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", order.ID).First(&updated).Error; err != nil {
 				return err
+			}
+			if !paymentConfirmationTermsEqual(expectedOrder, updated) {
+				return fmt.Errorf("%w: payment terms changed after transaction verification", ErrOrderNoLongerReceivable)
 			}
 			claimHash, err := paymentHashClaimKey(updated.TradeType, originalHash)
 			if err != nil {

@@ -12,7 +12,6 @@ import (
 	"github.com/shopspring/decimal"
 	"github.com/spf13/cast"
 	"github.com/v03413/bepusdt/app/conf"
-	"github.com/v03413/bepusdt/app/core"
 	"github.com/v03413/bepusdt/app/log"
 	"github.com/v03413/bepusdt/app/utils"
 )
@@ -104,10 +103,22 @@ type MethodItem struct {
 }
 
 func (o *Order) SetCanceled() error {
-	core.New()
-	o.Status = OrderStatusCanceled
+	if o == nil || o.ID == 0 {
+		return ErrOrderNoLongerReceivable
+	}
 
-	return Db.Save(o).Error
+	result := Db.Model(&Order{}).
+		Where("id = ? AND status = ?", o.ID, OrderStatusWaiting).
+		Update("status", OrderStatusCanceled)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrOrderNoLongerReceivable
+	}
+
+	o.Status = OrderStatusCanceled
+	return nil
 }
 
 // CanReselectPayment 判断订单是否支持重选交易类型
@@ -123,22 +134,68 @@ func (o *Order) CanReselectPayment() bool {
 	return o.TradeTypeReselect
 }
 
-func (o *Order) SetExpired() {
+func (o *Order) SetExpired() error {
+	if o == nil || o.ID == 0 {
+		return ErrOrderNoLongerReceivable
+	}
+
+	now := time.Now()
+	db := Db.Model(&Order{}).Where("id = ? AND status = ?", o.ID, OrderStatusWaiting)
+	if Db.Dialector.Name() == "sqlite" {
+		// SQLite persists timestamps as text; compare their normalized time values
+		// so records written with different UTC offsets are not ordered lexically.
+		db = db.Where("julianday(expired_at) <= julianday(?)", now)
+	} else {
+		db = db.Where("expired_at <= ?", now)
+	}
+	result := db.Update("status", OrderStatusExpired)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrOrderNoLongerReceivable
+	}
+
 	o.Status = OrderStatusExpired
-
-	Db.Save(o)
+	return nil
 }
 
-func (o *Order) SetSuccess() {
+func (o *Order) SetSuccess() error {
+	if o == nil || o.ID == 0 {
+		return ErrOrderNoLongerReceivable
+	}
+
+	result := Db.Model(&Order{}).
+		Where("id = ? AND status = ?", o.ID, OrderStatusConfirming).
+		Update("status", OrderStatusSuccess)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrOrderNoLongerReceivable
+	}
+
 	o.Status = OrderStatusSuccess
-
-	Db.Save(o)
+	return nil
 }
 
-func (o *Order) SetFailed() {
-	o.Status = OrderStatusFailed
+func (o *Order) SetFailed() error {
+	if o == nil || o.ID == 0 {
+		return ErrOrderNoLongerReceivable
+	}
 
-	Db.Save(o)
+	result := Db.Model(&Order{}).
+		Where("id = ? AND status = ?", o.ID, OrderStatusConfirming).
+		Update("status", OrderStatusFailed)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrOrderNoLongerReceivable
+	}
+
+	o.Status = OrderStatusFailed
+	return nil
 }
 
 func (o *Order) MarkConfirming(blockNum int, from, hash string, at time.Time, amount decimal.Decimal) error {

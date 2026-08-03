@@ -181,6 +181,9 @@ func BuildTrade(p OrderParams) (Trade, error) {
 }
 
 func RebuildOrder(t Order, p OrderParams) (Order, error) {
+	if t.Status != OrderStatusWaiting {
+		return t, ErrOrderNoLongerReceivable
+	}
 	if p.OrderId == t.OrderId && p.TradeType == t.TradeType && p.Money.String() == t.Money && p.Fiat == t.Fiat {
 		return t, nil
 	}
@@ -188,6 +191,39 @@ func RebuildOrder(t Order, p OrderParams) (Order, error) {
 	data, err := BuildTrade(p)
 	if err != nil {
 		return t, err
+	}
+
+	if err := applyRebuiltWaitingOrder(&t, p, data); err != nil {
+		return t, err
+	}
+
+	return t, nil
+}
+
+func applyRebuiltWaitingOrder(t *Order, p OrderParams, data Trade) error {
+	if t == nil || t.ID == 0 {
+		return ErrOrderNoLongerReceivable
+	}
+
+	expiredAt := CalcTradeExpiredAt(p.Timeout)
+	updates := map[string]any{
+		"fiat":                p.Fiat,
+		"address":             data.Wallet.GetPaymentAddr(),
+		"match_address":       data.Wallet.GetMatchAddr(),
+		"crypto":              data.Crypto,
+		"amount":              data.Amount,
+		"money":               p.Money.String(),
+		"trade_type":          p.TradeType,
+		"trade_type_reselect": p.TradeTypeReselect,
+		"rate":                fmt.Sprintf("%v", data.Rate),
+		"expired_at":          expiredAt,
+	}
+	result := Db.Model(&Order{}).Where("id = ? AND status = ?", t.ID, OrderStatusWaiting).Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrOrderNoLongerReceivable
 	}
 
 	t.Fiat = p.Fiat
@@ -199,9 +235,9 @@ func RebuildOrder(t Order, p OrderParams) (Order, error) {
 	t.TradeType = p.TradeType
 	t.TradeTypeReselect = p.TradeTypeReselect
 	t.Rate = fmt.Sprintf("%v", data.Rate)
-	t.ExpiredAt = CalcTradeExpiredAt(p.Timeout)
+	t.ExpiredAt = expiredAt
 
-	return t, Db.Save(&t).Error
+	return nil
 }
 
 // BuildPendingOrder 创建待支付订单（不锁定地址和汇率）

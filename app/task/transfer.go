@@ -332,9 +332,20 @@ func tronResourceHandle(ctx context.Context) {
 	}
 }
 
-func markFinalConfirmed(o model.Order) {
-	o.SetSuccess()
+func markFinalConfirmed(o model.Order) error {
+	if err := o.SetSuccess(); err != nil {
+		return err
+	}
 	notifyOrderSuccess(o)
+	return nil
+}
+
+func markConfirmingOrderFailed(order *model.Order) error {
+	if err := order.SetFailed(); err != nil {
+		return err
+	}
+	notify.Bepusdt(*order)
+	return nil
 }
 
 func receivableOrderStatuses() []int {
@@ -425,7 +436,9 @@ func expireWaitingOrders() {
 			continue
 		}
 
-		t.SetExpired()
+		if err := t.SetExpired(); err != nil {
+			continue
+		}
 		notify.Bepusdt(t)
 	}
 }
@@ -443,8 +456,9 @@ func getConfirmingOrders(tradeType []model.TradeType) []model.Order {
 	for _, order := range orders {
 		if time.Now().Unix() >= order.ExpiredAt.Unix() {
 			if order.ConfirmedAt == nil || order.ConfirmedAt.IsZero() || !order.ConfirmedAt.Before(order.ExpiredAt) {
-				order.SetFailed()
-				notify.Bepusdt(order)
+				if err := markConfirmingOrderFailed(&order); err != nil {
+					continue
+				}
 
 				continue
 			}
