@@ -81,6 +81,36 @@ func TestNormalizeSubmittedPaymentHash(t *testing.T) {
 	}
 }
 
+func TestSupportsSubmittedPaymentVerification(t *testing.T) {
+	supported := []model.TradeType{
+		model.TronTrx,
+		model.UsdtTrc20,
+		model.UsdcTrc20,
+		model.BscBnb,
+		model.UsdtBep20,
+		model.UsdcBep20,
+		model.UsdtSolana,
+		model.UsdcSolana,
+	}
+	for _, tradeType := range supported {
+		if !SupportsSubmittedPaymentVerification(tradeType) {
+			t.Fatalf("trade type %s should support submitted payment verification", tradeType)
+		}
+	}
+
+	unsupported := []model.TradeType{
+		model.UsdtErc20,
+		model.UsdcPolygon,
+		model.UsdtAptos,
+		model.UsdtTon,
+	}
+	for _, tradeType := range unsupported {
+		if SupportsSubmittedPaymentVerification(tradeType) {
+			t.Fatalf("trade type %s must not support submitted payment verification", tradeType)
+		}
+	}
+}
+
 func TestOrderTransferMatchReasonIdentifiesMismatch(t *testing.T) {
 	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
 		t.Fatalf("initialize test database: %v", err)

@@ -114,6 +114,17 @@ func isBscTrade(tradeType model.TradeType) bool {
 	return tradeType == model.BscBnb || tradeType == model.UsdtBep20 || tradeType == model.UsdcBep20
 }
 
+func isSolanaTrade(tradeType model.TradeType) bool {
+	return tradeType == model.UsdtSolana || tradeType == model.UsdcSolana
+}
+
+// SupportsSubmittedPaymentVerification reports whether the service can fetch
+// and validate a user-submitted transaction hash for a payment type. Keep the
+// cashier UI and HTTP endpoint on this single, explicit allowlist.
+func SupportsSubmittedPaymentVerification(tradeType model.TradeType) bool {
+	return isTronTrade(tradeType) || isBscTrade(tradeType) || isSolanaTrade(tradeType)
+}
+
 func lookupSubmittedPayment(ctx context.Context, order model.Order, hash string) (transfer, error) {
 	switch {
 	case isTronTrade(order.TradeType):
