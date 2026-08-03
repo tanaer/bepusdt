@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -441,20 +442,27 @@ func (Epusdt) Info(ctx *gin.Context) {
 // verification clue. The task layer independently fetches and validates the
 // transaction before this endpoint can move an order into confirmation.
 func (Epusdt) VerifyTransaction(ctx *gin.Context) {
+	startedAt := time.Now()
 	var req verifyTransactionReq
 	if err := ctx.ShouldBindJSON(&req); err != nil {
-		ctx.JSON(200, respFailJson("invalid transaction verification request"))
+		respondVerifyTransactionFailure(ctx, req.TradeID, "", req.TxHash, "invalid transaction verification request", "invalid_hash", startedAt)
 		return
 	}
 
 	order, ok := model.GetTradeOrder(req.TradeID)
 	if !ok {
-		ctx.JSON(200, respFailJson("order not found"))
+		respondVerifyTransactionFailure(ctx, req.TradeID, "", req.TxHash, "order not found", "order_not_receivable", startedAt)
+		return
+	}
+
+	if !task.SupportsSubmittedPaymentVerification(order.TradeType) {
+		respondVerifyTransactionFailure(ctx, order.TradeId, order.TradeType, req.TxHash, "transaction hash verification is not available for this payment network", "unsupported_network", startedAt)
 		return
 	}
 
 	if (order.Status == model.OrderStatusConfirming || order.Status == model.OrderStatusSuccess) &&
 		order.RefHash != "" && model.PaymentHashEqual(order.TradeType, order.RefHash, req.TxHash) {
+		logVerifyTransaction(order.TradeId, order.TradeType, req.TxHash, "idempotent", "", startedAt)
 		ctx.JSON(200, respSuccJson(gin.H{
 			"trade_id":   order.TradeId,
 			"status":     order.Status,
@@ -464,16 +472,18 @@ func (Epusdt) VerifyTransaction(ctx *gin.Context) {
 		return
 	}
 	if order.Status != model.OrderStatusWaiting && order.Status != model.OrderStatusExpired {
-		ctx.JSON(200, respFailJson("the current order status does not allow transaction verification"))
+		respondVerifyTransactionFailure(ctx, order.TradeId, order.TradeType, req.TxHash, "the current order status does not allow transaction verification", "order_not_receivable", startedAt)
 		return
 	}
 
 	_, err := verifyAndClaimSubmittedPayment(ctx.Request.Context(), &order, req.TxHash)
 	if err != nil {
-		ctx.JSON(200, respFailJson(submittedPaymentErrorMessage(err)))
+		message, errorCode := submittedPaymentErrorDetails(err)
+		respondVerifyTransactionFailure(ctx, order.TradeId, order.TradeType, req.TxHash, message, errorCode, startedAt)
 		return
 	}
 
+	logVerifyTransaction(order.TradeId, order.TradeType, req.TxHash, "verified", "", startedAt)
 	ctx.JSON(200, respSuccJson(gin.H{
 		"trade_id":   order.TradeId,
 		"status":     order.Status,
@@ -481,23 +491,47 @@ func (Epusdt) VerifyTransaction(ctx *gin.Context) {
 	}))
 }
 
-func submittedPaymentErrorMessage(err error) string {
+func verifyTransactionFailJSON(message, errorCode string) gin.H {
+	return gin.H{"status_code": 400, "message": message, "error_code": errorCode}
+}
+
+func respondVerifyTransactionFailure(ctx *gin.Context, tradeID string, tradeType model.TradeType, txHash, message, errorCode string, startedAt time.Time) {
+	logVerifyTransaction(tradeID, tradeType, txHash, "failed", errorCode, startedAt)
+	ctx.JSON(200, verifyTransactionFailJSON(message, errorCode))
+}
+
+func logVerifyTransaction(tradeID string, tradeType model.TradeType, txHash, result, errorCode string, startedAt time.Time) {
+	fields := map[string]interface{}{
+		"trade_id":        tradeID,
+		"trade_type":      string(tradeType),
+		"tx_hash":         strings.TrimSpace(txHash),
+		"result":          result,
+		"error_code":      errorCode,
+		"rpc_duration_ms": time.Since(startedAt).Milliseconds(),
+	}
+	if result == "failed" {
+		log.WarnFields(fields, "submitted transaction verification failed")
+		return
+	}
+	log.InfoFields(fields, "submitted transaction verification completed")
+}
+
+func submittedPaymentErrorDetails(err error) (message, errorCode string) {
 	switch {
 	case errors.Is(err, task.ErrInvalidSubmittedPaymentHash):
-		return "invalid transaction hash"
+		return "invalid transaction hash", "invalid_hash"
 	case errors.Is(err, task.ErrUnsupportedSubmittedPayment):
-		return "transaction hash verification is not available for this payment network"
+		return "transaction hash verification is not available for this payment network", "unsupported_network"
 	case errors.Is(err, task.ErrSubmittedPaymentNotFound):
-		return "transaction was not found or has not been confirmed on-chain yet"
+		return "transaction was not found or has not been confirmed on-chain yet", "transaction_not_found"
 	case errors.Is(err, task.ErrSubmittedPaymentDoesNotMatch):
-		return "the submitted transaction does not match this order"
+		return "the submitted transaction does not match this order", "transaction_mismatch"
 	case errors.Is(err, model.ErrPaymentHashAlreadyClaimed):
-		return "this transaction has already been used for another order"
+		return "this transaction has already been used for another order", "transaction_already_used"
 	case errors.Is(err, model.ErrOrderNoLongerReceivable):
-		return "the current order status does not allow transaction verification"
+		return "the current order status does not allow transaction verification", "order_not_receivable"
 	default:
-		log.Warn(fmt.Sprintf("verify submitted transaction failed: %v", err))
-		return "unable to verify this transaction right now; please try again"
+		return "unable to verify this transaction right now; please try again", "verification_unavailable"
 	}
 }
 

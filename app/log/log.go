@@ -79,6 +79,25 @@ func Warn(args ...interface{}) {
 	be.Warnln(args...)
 }
 
+// InfoFields records structured information when the application logger has
+// been initialized. Handlers are also exercised without log.Init in unit
+// tests, so logging must not make a request fail in that environment.
+func InfoFields(fields map[string]interface{}, args ...interface{}) {
+	if be == nil {
+		return
+	}
+	be.WithFields(logrus.Fields(fields)).Infoln(args...)
+}
+
+// WarnFields records structured warning information without requiring callers
+// to know whether the application logger has been initialized.
+func WarnFields(fields map[string]interface{}, args ...interface{}) {
+	if be == nil {
+		return
+	}
+	be.WithFields(logrus.Fields(fields)).Warnln(args...)
+}
+
 func GetWriter() *io.PipeWriter {
 
 	return be.Writer()

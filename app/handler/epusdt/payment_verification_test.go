@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -198,5 +199,166 @@ func TestVerifyTransactionUsesChainSpecificIdempotencyHashComparison(t *testing.
 				t.Fatalf("verifier should not run for an already completed order; response=%s", w.Body.String())
 			}
 		})
+	}
+}
+
+func TestVerifyTransactionRejectsUnsupportedNetworkBeforeIdempotency(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newVerifyTransactionTestOrder("unsupported-network", model.UsdtErc20, model.OrderStatusSuccess, now)
+	order.RefHash = "0x" + strings.Repeat("a", 64)
+	if err := model.Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	called := false
+	originalVerifier := verifyAndClaimSubmittedPayment
+	verifyAndClaimSubmittedPayment = func(context.Context, *model.Order, string) (bool, error) {
+		called = true
+		return false, nil
+	}
+	t.Cleanup(func() { verifyAndClaimSubmittedPayment = originalVerifier })
+
+	response := invokeVerifyTransaction(t, order.TradeId, order.RefHash)
+	if response.StatusCode != http.StatusBadRequest || response.ErrorCode != "unsupported_network" {
+		t.Fatalf("unsupported-network response = %+v, want status_code=400 error_code=unsupported_network", response)
+	}
+	if called {
+		t.Fatal("verifier must not run for an unsupported payment network")
+	}
+}
+
+func TestVerifyTransactionReturnsStableErrorCodes(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	originalVerifier := verifyAndClaimSubmittedPayment
+	t.Cleanup(func() { verifyAndClaimSubmittedPayment = originalVerifier })
+
+	t.Run("invalid request", func(t *testing.T) {
+		response := invokeVerifyTransactionPayload(t, `{"trade_id":"missing-hash"}`)
+		assertVerifyTransactionErrorCode(t, response, "invalid_hash")
+	})
+
+	t.Run("order not found", func(t *testing.T) {
+		response := invokeVerifyTransaction(t, "does-not-exist", strings.Repeat("a", 64))
+		assertVerifyTransactionErrorCode(t, response, "order_not_receivable")
+	})
+
+	t.Run("order status is not receivable", func(t *testing.T) {
+		order := newVerifyTransactionTestOrder("not-receivable", model.UsdtTrc20, model.OrderStatusSuccess, now)
+		if err := model.Db.Create(&order).Error; err != nil {
+			t.Fatalf("create order: %v", err)
+		}
+		response := invokeVerifyTransaction(t, order.TradeId, strings.Repeat("a", 64))
+		assertVerifyTransactionErrorCode(t, response, "order_not_receivable")
+	})
+
+	for _, tc := range []struct {
+		name string
+		err  error
+		code string
+	}{
+		{name: "invalid hash", err: task.ErrInvalidSubmittedPaymentHash, code: "invalid_hash"},
+		{name: "unsupported verifier", err: task.ErrUnsupportedSubmittedPayment, code: "unsupported_network"},
+		{name: "transaction not found", err: task.ErrSubmittedPaymentNotFound, code: "transaction_not_found"},
+		{name: "transaction mismatch", err: task.ErrSubmittedPaymentDoesNotMatch, code: "transaction_mismatch"},
+		{name: "transaction already used", err: model.ErrPaymentHashAlreadyClaimed, code: "transaction_already_used"},
+		{name: "order no longer receivable", err: model.ErrOrderNoLongerReceivable, code: "order_not_receivable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			order := newVerifyTransactionTestOrder("error-"+tc.code, model.UsdtTrc20, model.OrderStatusWaiting, now)
+			if err := model.Db.Create(&order).Error; err != nil {
+				t.Fatalf("create order: %v", err)
+			}
+			verifyAndClaimSubmittedPayment = func(context.Context, *model.Order, string) (bool, error) {
+				return false, tc.err
+			}
+
+			response := invokeVerifyTransaction(t, order.TradeId, strings.Repeat("a", 64))
+			assertVerifyTransactionErrorCode(t, response, tc.code)
+		})
+	}
+}
+
+func TestVerifyTransactionUnknownErrorIsNilSafeAndUsesUnavailableCode(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newVerifyTransactionTestOrder("unknown-verification-error", model.UsdtTrc20, model.OrderStatusWaiting, now)
+	if err := model.Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	originalVerifier := verifyAndClaimSubmittedPayment
+	verifyAndClaimSubmittedPayment = func(context.Context, *model.Order, string) (bool, error) {
+		return false, errors.New("temporary RPC outage")
+	}
+	t.Cleanup(func() { verifyAndClaimSubmittedPayment = originalVerifier })
+
+	response := invokeVerifyTransaction(t, order.TradeId, strings.Repeat("a", 64))
+	assertVerifyTransactionErrorCode(t, response, "verification_unavailable")
+}
+
+type verifyTransactionTestResponse struct {
+	StatusCode int    `json:"status_code"`
+	Message    string `json:"message"`
+	ErrorCode  string `json:"error_code"`
+}
+
+func newVerifyTransactionTestOrder(tradeID string, tradeType model.TradeType, status int, now time.Time) model.Order {
+	return model.Order{
+		OrderId:      "merchant-" + tradeID,
+		TradeId:      "local-" + tradeID,
+		TradeType:    tradeType,
+		Fiat:         model.CNY,
+		Crypto:       model.USDT,
+		Rate:         "7.00",
+		Amount:       "2.65",
+		Money:        "18.55",
+		Address:      "TKNUJShSXfCDii9bxdguPwgZsKXG6rBLC6",
+		MatchAddress: "TKNUJShSXfCDii9bxdguPwgZsKXG6rBLC6",
+		Status:       status,
+		ApiType:      model.OrderApiTypeEpusdt,
+		ExpiredAt:    now.Add(time.Minute),
+		ConfirmedAt:  &now,
+		AutoTimeAt:   model.AutoTimeAt{CreatedAt: (*model.Datetime)(&now), UpdatedAt: (*model.Datetime)(&now)},
+	}
+}
+
+func invokeVerifyTransaction(t *testing.T, tradeID, txHash string) verifyTransactionTestResponse {
+	t.Helper()
+	return invokeVerifyTransactionPayload(t, `{"trade_id":`+strconv.Quote(tradeID)+`,"tx_hash":`+strconv.Quote(txHash)+`}`)
+}
+
+func invokeVerifyTransactionPayload(t *testing.T, payload string) verifyTransactionTestResponse {
+	t.Helper()
+	w := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(w)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/pay/verify-transaction", bytes.NewBufferString(payload))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	new(Epusdt).VerifyTransaction(ctx)
+
+	var response verifyTransactionTestResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	return response
+}
+
+func assertVerifyTransactionErrorCode(t *testing.T, response verifyTransactionTestResponse, want string) {
+	t.Helper()
+	if response.StatusCode != http.StatusBadRequest || response.ErrorCode != want {
+		t.Fatalf("verification response = %+v, want status_code=400 error_code=%q", response, want)
 	}
 }
