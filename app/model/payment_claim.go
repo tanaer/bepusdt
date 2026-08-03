@@ -1,11 +1,13 @@
 package model
 
 import (
+	"encoding/base32"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/btcsuite/btcd/btcutil/base58"
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -39,6 +41,144 @@ type PaymentConfirmation struct {
 	Amount   decimal.Decimal
 }
 
+// PaymentHashEqual compares transaction identifiers according to the chain
+// that produced them. Solana signatures are case-sensitive Base58 values;
+// hex-based chains retain their historical case-insensitive behavior.
+func PaymentHashEqual(tradeType TradeType, left, right string) bool {
+	return canonicalPaymentHash(tradeType, left) == canonicalPaymentHash(tradeType, right)
+}
+
+func canonicalPaymentHash(tradeType TradeType, hash string) string {
+	hash = strings.TrimSpace(hash)
+	switch {
+	case isSolanaPaymentTrade(tradeType):
+		return hash
+	case isTronPaymentTrade(tradeType):
+		return strings.TrimPrefix(strings.ToLower(hash), "0x")
+	case isBscPaymentTrade(tradeType):
+		return "0x" + strings.TrimPrefix(strings.ToLower(hash), "0x")
+	default:
+		return strings.ToLower(hash)
+	}
+}
+
+func paymentHashClaimKey(tradeType TradeType, hash string) (string, error) {
+	hash = strings.TrimSpace(hash)
+	if !isSolanaPaymentTrade(tradeType) {
+		return canonicalPaymentHash(tradeType, hash), nil
+	}
+
+	decoded := base58.Decode(hash)
+	if len(decoded) != 64 || base58.Encode(decoded) != hash {
+		return "", fmt.Errorf("claim payment confirmation: invalid Solana transaction hash")
+	}
+
+	// MySQL commonly uses a case-insensitive collation. Base32 encodes the
+	// signature bytes into a lowercase-only key so two distinct Base58 values
+	// cannot collide merely because their letters differ in case.
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(decoded)
+	return "solana:" + strings.ToLower(encoded), nil
+}
+
+func isSolanaPaymentTrade(tradeType TradeType) bool {
+	return tradeType == UsdtSolana || tradeType == UsdcSolana
+}
+
+func isTronPaymentTrade(tradeType TradeType) bool {
+	return tradeType == TronTrx || tradeType == UsdtTrc20 || tradeType == UsdcTrc20
+}
+
+func isBscPaymentTrade(tradeType TradeType) bool {
+	return tradeType == BscBnb || tradeType == UsdtBep20 || tradeType == UsdcBep20
+}
+
+func legacyPaymentHashLookupVariants(tradeType TradeType, hash string) []string {
+	canonical := canonicalPaymentHash(tradeType, hash)
+	switch {
+	case isTronPaymentTrade(tradeType):
+		return []string{canonical, "0x" + canonical}
+	case isBscPaymentTrade(tradeType):
+		return []string{canonical, strings.TrimPrefix(canonical, "0x")}
+	default:
+		return []string{canonical}
+	}
+}
+
+func legacyPaymentHashAlreadyClaimed(tx *gorm.DB, order Order, hash string) error {
+	var candidates []Order
+	query := tx.Where("id <> ?", order.ID)
+	if isSolanaPaymentTrade(order.TradeType) {
+		// A MySQL default collation may return case variants for this query.
+		// Therefore the result must always be compared byte-for-byte in Go.
+		query = query.Where("ref_hash = ?", strings.TrimSpace(hash))
+	} else {
+		query = query.Where("LOWER(TRIM(ref_hash)) IN ?", legacyPaymentHashLookupVariants(order.TradeType, hash))
+	}
+	if err := query.Find(&candidates).Error; err != nil {
+		return err
+	}
+	for _, candidate := range candidates {
+		if PaymentHashEqual(order.TradeType, candidate.RefHash, hash) {
+			return ErrPaymentHashAlreadyClaimed
+		}
+	}
+	return nil
+}
+
+func legacyRawSolanaPaymentHashAlreadyClaimed(tx *gorm.DB, hash string) error {
+	var claims []PaymentHashClaim
+	// Earlier versions stored raw Base58 signatures as primary keys. A
+	// case-insensitive collation can return case variants here, so verify the
+	// exact signature in Go before treating the old row as a collision.
+	if err := tx.Where("hash = ?", strings.TrimSpace(hash)).Find(&claims).Error; err != nil {
+		return err
+	}
+	for _, claim := range claims {
+		if claim.Hash == strings.TrimSpace(hash) {
+			return ErrPaymentHashAlreadyClaimed
+		}
+	}
+	return nil
+}
+
+func applyClaimedPaymentConfirmation(tx *gorm.DB, order *Order, payment PaymentConfirmation) error {
+	updates := map[string]any{
+		"from_address":  payment.From,
+		"confirmed_at":  payment.At,
+		"ref_hash":      strings.TrimSpace(payment.Hash),
+		"ref_block_num": payment.BlockNum,
+		"status":        OrderStatusConfirming,
+	}
+	if order.AddressLocked {
+		rate, _ := decimal.NewFromString(order.Rate)
+		updates["amount"] = payment.Amount.String()
+		updates["money"] = rate.Mul(payment.Amount).String()
+	}
+
+	result := tx.Model(&Order{}).
+		Where("id = ? AND status IN ?", order.ID, []int{OrderStatusWaiting, OrderStatusExpired}).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrOrderNoLongerReceivable
+	}
+
+	order.FromAddress = payment.From
+	order.ConfirmedAt = &payment.At
+	order.RefHash = strings.TrimSpace(payment.Hash)
+	order.RefBlockNum = payment.BlockNum
+	order.Status = OrderStatusConfirming
+	if order.AddressLocked {
+		rate, _ := decimal.NewFromString(order.Rate)
+		order.Amount = payment.Amount.String()
+		order.Money = rate.Mul(payment.Amount).String()
+	}
+
+	return nil
+}
+
 // ClaimPaymentConfirmation atomically reserves a transaction hash and moves a
 // waiting (or lookback-expired) order into the existing confirming workflow.
 // Repeating a successful claim for the same order is intentionally idempotent.
@@ -51,23 +191,18 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 	if originalHash == "" {
 		return false, fmt.Errorf("claim payment confirmation: transaction hash is required")
 	}
-	// Keep Solana's case-sensitive Base58 signature exact both on the order and
-	// in the uniqueness claim. Hex transaction identifiers on the other chains
-	// remain normalized for migration compatibility.
-	claimHash := originalHash
-	trade, isKnownTrade := registry[order.TradeType]
-	isSolana := isKnownTrade && trade.Network == Network("solana")
-	if !isSolana {
-		claimHash = strings.ToLower(originalHash)
-	}
 
 	var updated Order
 	err = Db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("id = ?", order.ID).First(&updated).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", order.ID).First(&updated).Error; err != nil {
+			return err
+		}
+		claimHash, err := paymentHashClaimKey(updated.TradeType, originalHash)
+		if err != nil {
 			return err
 		}
 
-		if updated.RefHash != "" && strings.EqualFold(updated.RefHash, originalHash) &&
+		if updated.RefHash != "" && PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) &&
 			(updated.Status == OrderStatusConfirming || updated.Status == OrderStatusSuccess) {
 			alreadyClaimed = true
 			return nil
@@ -78,17 +213,13 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 		// Records created before payment-hash claims were introduced do not have
 		// a claim row. Check the order table as a migration-safe fallback before
 		// reserving this hash for a new order.
-		var legacyOwner Order
-		legacyQuery := "LOWER(ref_hash) = ? AND id <> ?"
-		if isSolana {
-			legacyQuery = "ref_hash = ? AND id <> ?"
+		if err := legacyPaymentHashAlreadyClaimed(tx, updated, originalHash); err != nil {
+			return err
 		}
-		legacyLookup := tx.Where(legacyQuery, claimHash, updated.ID).First(&legacyOwner).Error
-		if legacyLookup == nil {
-			return ErrPaymentHashAlreadyClaimed
-		}
-		if legacyLookup != nil && !errors.Is(legacyLookup, gorm.ErrRecordNotFound) {
-			return legacyLookup
+		if isSolanaPaymentTrade(updated.TradeType) {
+			if err := legacyRawSolanaPaymentHashAlreadyClaimed(tx, originalHash); err != nil {
+				return err
+			}
 		}
 
 		claim := PaymentHashClaim{Hash: claimHash, OrderID: updated.ID}
@@ -99,28 +230,23 @@ func ClaimPaymentConfirmation(order *Order, payment PaymentConfirmation) (alread
 		if create.RowsAffected == 0 {
 			var existing PaymentHashClaim
 			lookupErr := tx.Where("hash = ?", claimHash).First(&existing).Error
-			if lookupErr == nil && existing.OrderID != updated.ID {
+			if lookupErr != nil {
+				return lookupErr
+			}
+			if existing.OrderID != updated.ID {
 				return ErrPaymentHashAlreadyClaimed
 			}
-			if lookupErr == nil && existing.OrderID == updated.ID && strings.EqualFold(updated.RefHash, originalHash) {
+			if err := tx.Clauses(clause.Locking{Strength: clause.LockingStrengthUpdate}).Where("id = ?", updated.ID).First(&updated).Error; err != nil {
+				return err
+			}
+			if PaymentHashEqual(updated.TradeType, updated.RefHash, originalHash) {
 				alreadyClaimed = true
 				return nil
 			}
-			return lookupErr
+			return fmt.Errorf("%w: existing order claim does not match transaction hash", ErrPaymentHashAlreadyClaimed)
 		}
 
-		updated.FromAddress = payment.From
-		updated.ConfirmedAt = &payment.At
-		updated.RefHash = originalHash
-		updated.RefBlockNum = payment.BlockNum
-		updated.Status = OrderStatusConfirming
-		if updated.AddressLocked {
-			rate, _ := decimal.NewFromString(updated.Rate)
-			updated.Amount = payment.Amount.String()
-			updated.Money = rate.Mul(payment.Amount).String()
-		}
-
-		return tx.Save(&updated).Error
+		return applyClaimedPaymentConfirmation(tx, &updated, payment)
 	})
 	if err != nil {
 		return false, err

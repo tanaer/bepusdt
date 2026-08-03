@@ -7,12 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 	"github.com/v03413/bepusdt/app/model"
+	"github.com/v03413/bepusdt/app/task"
 )
 
 func TestVerifyTransactionMarksOrderConfirming(t *testing.T) {
@@ -85,5 +88,115 @@ func TestVerifyTransactionMarksOrderConfirming(t *testing.T) {
 	}
 	if refreshed.Status != model.OrderStatusConfirming || refreshed.RefHash != response.Data.TradeHash {
 		t.Fatalf("order was not marked confirming: %+v", refreshed)
+	}
+}
+
+func TestVerifyTransactionUsesChainSpecificIdempotencyHashComparison(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	for _, tc := range []struct {
+		name           string
+		tradeType      model.TradeType
+		status         int
+		storedHash     string
+		submittedHash  string
+		wantIdempotent bool
+		wantStatusCode int
+		wantMessage    string
+	}{
+		{
+			name:           "Solana case variant is not idempotent for successful order",
+			tradeType:      model.UsdcSolana,
+			status:         model.OrderStatusSuccess,
+			storedHash:     "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4",
+			submittedHash:  "2GqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4",
+			wantIdempotent: false,
+			wantStatusCode: http.StatusBadRequest,
+			wantMessage:    "the current order status does not allow transaction verification",
+		},
+		{
+			name:           "Solana case variant is not idempotent for confirming order",
+			tradeType:      model.UsdcSolana,
+			status:         model.OrderStatusConfirming,
+			storedHash:     "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4",
+			submittedHash:  "2GqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4",
+			wantIdempotent: false,
+			wantStatusCode: http.StatusBadRequest,
+			wantMessage:    "the current order status does not allow transaction verification",
+		},
+		{
+			name:           "BSC optional prefix is idempotent",
+			tradeType:      model.UsdtBep20,
+			status:         model.OrderStatusSuccess,
+			storedHash:     "0x" + strings.Repeat("a", 64),
+			submittedHash:  strings.Repeat("A", 64),
+			wantIdempotent: true,
+			wantStatusCode: http.StatusOK,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			order := model.Order{
+				OrderId:      "merchant-" + tc.name,
+				TradeId:      "local-" + tc.name,
+				TradeType:    tc.tradeType,
+				Fiat:         model.CNY,
+				Crypto:       model.USDC,
+				Rate:         "7.00",
+				Amount:       "2.65",
+				Money:        "18.55",
+				Address:      "DAzEQJ8TzdmrAgphrcGGZie4fwiXmRYXRCKX4wQh2oLf",
+				MatchAddress: "DAzEQJ8TzdmrAgphrcGGZie4fwiXmRYXRCKX4wQh2oLf",
+				Status:       tc.status,
+				ApiType:      model.OrderApiTypeEpusdt,
+				RefHash:      tc.storedHash,
+				ExpiredAt:    now.Add(time.Minute),
+				ConfirmedAt:  &now,
+				AutoTimeAt:   model.AutoTimeAt{CreatedAt: (*model.Datetime)(&now), UpdatedAt: (*model.Datetime)(&now)},
+			}
+			if err := model.Db.Create(&order).Error; err != nil {
+				t.Fatalf("create order: %v", err)
+			}
+
+			called := false
+			originalVerifier := verifyAndClaimSubmittedPayment
+			verifyAndClaimSubmittedPayment = func(context.Context, *model.Order, string) (bool, error) {
+				called = true
+				return false, task.ErrSubmittedPaymentDoesNotMatch
+			}
+			t.Cleanup(func() { verifyAndClaimSubmittedPayment = originalVerifier })
+
+			w := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(w)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/pay/verify-transaction", bytes.NewBufferString(`{"trade_id":`+strconv.Quote(order.TradeId)+`,"tx_hash":`+strconv.Quote(tc.submittedHash)+`}`))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			new(Epusdt).VerifyTransaction(ctx)
+
+			var response struct {
+				StatusCode int    `json:"status_code"`
+				Message    string `json:"message"`
+				Data       struct {
+					Idempotent bool `json:"idempotent"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if response.Data.Idempotent != tc.wantIdempotent {
+				t.Fatalf("idempotent = %t, want %t; response=%s", response.Data.Idempotent, tc.wantIdempotent, w.Body.String())
+			}
+			if response.StatusCode != tc.wantStatusCode {
+				t.Fatalf("status_code = %d, want %d; response=%s", response.StatusCode, tc.wantStatusCode, w.Body.String())
+			}
+			if tc.wantMessage != "" && response.Message != tc.wantMessage {
+				t.Fatalf("message = %q, want %q; response=%s", response.Message, tc.wantMessage, w.Body.String())
+			}
+			if called {
+				t.Fatalf("verifier should not run for an already completed order; response=%s", w.Body.String())
+			}
+		})
 	}
 }

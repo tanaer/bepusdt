@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -455,7 +454,7 @@ func (Epusdt) VerifyTransaction(ctx *gin.Context) {
 	}
 
 	if (order.Status == model.OrderStatusConfirming || order.Status == model.OrderStatusSuccess) &&
-		order.RefHash != "" && strings.EqualFold(order.RefHash, strings.TrimSpace(req.TxHash)) {
+		order.RefHash != "" && model.PaymentHashEqual(order.TradeType, order.RefHash, req.TxHash) {
 		ctx.JSON(200, respSuccJson(gin.H{
 			"trade_id":   order.TradeId,
 			"status":     order.Status,

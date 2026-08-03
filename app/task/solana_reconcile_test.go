@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,8 +158,8 @@ func TestSolanaReconcileWaitingOrdersMarksMatchingOrderConfirming(t *testing.T) 
 	if err := model.Db.Where("order_id = ?", order.ID).First(&claim).Error; err != nil {
 		t.Fatalf("load payment hash claim: %v", err)
 	}
-	if claim.Hash != testSolanaTxHash {
-		t.Fatalf("payment hash claim = %q, want %q", claim.Hash, testSolanaTxHash)
+	if claim.Hash == testSolanaTxHash || !strings.HasPrefix(claim.Hash, "solana:") {
+		t.Fatalf("payment hash claim = %q, want a canonical Solana claim key", claim.Hash)
 	}
 }
 

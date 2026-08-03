@@ -3,6 +3,7 @@ package model
 import (
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +24,6 @@ func TestClaimPaymentConfirmationPreventsHashReuseAndIsIdempotent(t *testing.T) 
 	if err := Db.Create(&second).Error; err != nil {
 		t.Fatalf("create second order: %v", err)
 	}
-
 	payment := PaymentConfirmation{
 		BlockNum: 100,
 		From:     "TJ5usJLLwjwn7Pw3TPbdzreG7dvgKzfQ5y",
@@ -109,8 +109,244 @@ func TestClaimPaymentConfirmationPreservesCaseSensitiveSolanaSignature(t *testin
 	if err := Db.Where("order_id = ?", order.ID).First(&claim).Error; err != nil {
 		t.Fatalf("load Solana payment claim: %v", err)
 	}
-	if claim.Hash != signature {
-		t.Fatalf("Solana claim key = %q, want case-sensitive signature %q", claim.Hash, signature)
+	if claim.Hash == signature {
+		t.Fatalf("Solana claim key must be collation-safe, got raw signature %q", claim.Hash)
+	}
+	if !strings.HasPrefix(claim.Hash, "solana:") {
+		t.Fatalf("Solana claim key = %q, want solana prefix", claim.Hash)
+	}
+	encodedClaim := strings.TrimPrefix(claim.Hash, "solana:")
+	if len(encodedClaim) != 103 || encodedClaim != strings.ToLower(encodedClaim) || strings.Contains(encodedClaim, "=") {
+		t.Fatalf("Solana claim key = %q, want lowercase unpadded Base32", claim.Hash)
+	}
+
+	already, err := ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 435577393,
+		From:     "H1NwZnujLy6q2q9Mj813xCMSzkmYE6p6PzyC2zswJSmK",
+		Hash:     signature,
+		At:       time.Unix(1785171892, 0),
+		Amount:   decimal.RequireFromString("1.32"),
+	})
+	if err != nil || !already {
+		t.Fatalf("repeat Solana claim = already:%t err:%v, want idempotent success", already, err)
+	}
+}
+
+func TestPaymentHashEqualUsesChainSpecificCanonicalization(t *testing.T) {
+	const solanaSignature = "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	const solanaCaseVariant = "2GqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	if PaymentHashEqual(UsdcSolana, solanaSignature, solanaCaseVariant) {
+		t.Fatal("Solana signatures that differ by case must not compare equal")
+	}
+	if !PaymentHashEqual(UsdtBep20, strings.Repeat("A", 64), "0x"+strings.Repeat("a", 64)) {
+		t.Fatal("BSC transaction hashes with or without 0x must compare equal")
+	}
+	if !PaymentHashEqual(UsdtTrc20, "0x"+strings.Repeat("A", 64), strings.Repeat("a", 64)) {
+		t.Fatal("TRON transaction hashes with optional 0x must compare equal")
+	}
+}
+
+func TestClaimPaymentConfirmationAllowsDistinctSolanaCaseVariant(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	first := newPaymentClaimTestOrder("solana-case-first", now)
+	second := newPaymentClaimTestOrder("solana-case-second", now)
+	first.TradeType = UsdcSolana
+	second.TradeType = UsdcSolana
+	if err := Db.Create(&first).Error; err != nil {
+		t.Fatalf("create first order: %v", err)
+	}
+	if err := Db.Create(&second).Error; err != nil {
+		t.Fatalf("create second order: %v", err)
+	}
+	third := newPaymentClaimTestOrder("solana-case-third", now)
+	third.TradeType = UsdcSolana
+	if err := Db.Create(&third).Error; err != nil {
+		t.Fatalf("create third order: %v", err)
+	}
+
+	const signature = "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	const caseVariant = "2GqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	basePayment := PaymentConfirmation{BlockNum: 1, From: "sender", At: now, Amount: decimal.RequireFromString("1.00")}
+
+	basePayment.Hash = signature
+	if _, err := ClaimPaymentConfirmation(&first, basePayment); err != nil {
+		t.Fatalf("claim original signature: %v", err)
+	}
+	if _, err := ClaimPaymentConfirmation(&third, basePayment); !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
+		t.Fatalf("claim exact Solana signature for another order error = %v, want ErrPaymentHashAlreadyClaimed", err)
+	}
+	basePayment.Hash = caseVariant
+	if _, err := ClaimPaymentConfirmation(&second, basePayment); err != nil {
+		t.Fatalf("claim case-variant signature: %v", err)
+	}
+}
+
+func TestClaimPaymentConfirmationTreatsBscPrefixVariantsAsIdempotent(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newPaymentClaimTestOrder("bsc-prefix-variant", now)
+	order.TradeType = UsdtBep20
+	if err := Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	firstHash := strings.Repeat("A", 64)
+	if _, err := ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 1,
+		From:     "0xsender",
+		Hash:     firstHash,
+		At:       now,
+		Amount:   decimal.RequireFromString("1.00"),
+	}); err != nil {
+		t.Fatalf("claim BSC payment without prefix: %v", err)
+	}
+
+	already, err := ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 1,
+		From:     "0xsender",
+		Hash:     "0x" + strings.Repeat("a", 64),
+		At:       now,
+		Amount:   decimal.RequireFromString("1.00"),
+	})
+	if err != nil || !already {
+		t.Fatalf("repeat BSC claim = already:%t err:%v, want idempotent success", already, err)
+	}
+}
+
+func TestClaimPaymentConfirmationProtectsLegacyBscPrefixVariant(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	legacy := newPaymentClaimTestOrder("legacy-bsc-payment-claim", now)
+	legacy.TradeType = UsdtBep20
+	legacy.Status = OrderStatusConfirming
+	legacy.RefHash = "0x" + strings.Repeat("a", 64)
+	if err := Db.Create(&legacy).Error; err != nil {
+		t.Fatalf("create legacy order: %v", err)
+	}
+
+	order := newPaymentClaimTestOrder("new-bsc-payment-claim", now)
+	order.TradeType = UsdtBep20
+	if err := Db.Create(&order).Error; err != nil {
+		t.Fatalf("create new order: %v", err)
+	}
+
+	_, err := ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 1,
+		From:     "0xsender",
+		Hash:     strings.Repeat("A", 64),
+		At:       now,
+		Amount:   decimal.RequireFromString("1.00"),
+	})
+	if !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
+		t.Fatalf("legacy BSC prefix variant error = %v, want ErrPaymentHashAlreadyClaimed", err)
+	}
+}
+
+func TestClaimPaymentConfirmationRejectsConflictingClaimForSameOrder(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newPaymentClaimTestOrder("conflicting-payment-claim", now)
+	order.TradeType = UsdcSolana
+	order.RefHash = "2GqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	if err := Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	const hash = "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	claimHash, err := paymentHashClaimKey(order.TradeType, hash)
+	if err != nil {
+		t.Fatalf("build Solana claim key: %v", err)
+	}
+	if err := Db.Create(&PaymentHashClaim{Hash: claimHash, OrderID: order.ID}).Error; err != nil {
+		t.Fatalf("seed conflicting payment claim: %v", err)
+	}
+
+	_, err = ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 1,
+		From:     "sender",
+		Hash:     hash,
+		At:       now,
+		Amount:   decimal.RequireFromString("1.00"),
+	})
+	if !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
+		t.Fatalf("conflicting claim error = %v, want ErrPaymentHashAlreadyClaimed", err)
+	}
+}
+
+func TestApplyClaimedPaymentConfirmationDoesNotOverwriteNonReceivableOrder(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	stored := newPaymentClaimTestOrder("non-receivable-payment-claim", now)
+	stored.Status = OrderStatusConfirming
+	stored.RefHash = "existing-transaction"
+	if err := Db.Create(&stored).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	stale := stored
+	stale.Status = OrderStatusWaiting
+	err := applyClaimedPaymentConfirmation(Db, &stale, PaymentConfirmation{
+		BlockNum: 2,
+		From:     "new-sender",
+		Hash:     "new-transaction",
+		At:       now.Add(time.Second),
+		Amount:   decimal.RequireFromString("1.00"),
+	})
+	if !errors.Is(err, ErrOrderNoLongerReceivable) {
+		t.Fatalf("apply stale payment confirmation error = %v, want ErrOrderNoLongerReceivable", err)
+	}
+
+	var refreshed Order
+	if err := Db.First(&refreshed, stored.ID).Error; err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if refreshed.Status != OrderStatusConfirming || refreshed.RefHash != "existing-transaction" {
+		t.Fatalf("non-receivable order was overwritten: %+v", refreshed)
+	}
+}
+
+func TestClaimPaymentConfirmationProtectsLegacyRawSolanaClaimWithoutOrder(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newPaymentClaimTestOrder("legacy-raw-solana-claim", now)
+	order.TradeType = UsdcSolana
+	if err := Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	const signature = "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
+	if err := Db.Create(&PaymentHashClaim{Hash: signature, OrderID: order.ID + 100}).Error; err != nil {
+		t.Fatalf("seed legacy raw Solana claim: %v", err)
+	}
+
+	_, err := ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 1,
+		From:     "sender",
+		Hash:     signature,
+		At:       now,
+		Amount:   decimal.RequireFromString("1.00"),
+	})
+	if !errors.Is(err, ErrPaymentHashAlreadyClaimed) {
+		t.Fatalf("legacy raw Solana claim error = %v, want ErrPaymentHashAlreadyClaimed", err)
 	}
 }
 
