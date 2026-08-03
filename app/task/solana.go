@@ -505,9 +505,11 @@ func (s *solana) reconcileOrderTokenAccount(ctx context.Context, order model.Ord
 			continue
 		}
 
-		blockTime := sig.Get("blockTime").Int()
-		if blockTime > 0 {
-			ts := time.Unix(blockTime, 0)
+		signatureBlockTime := sig.Get("blockTime").Int()
+		signatureTimestamp := time.Time{}
+		if signatureBlockTime > 0 {
+			signatureTimestamp = time.Unix(signatureBlockTime, 0)
+			ts := signatureTimestamp
 			if !order.CreatedAt.Before(ts) || !order.ExpiredAt.After(ts) {
 				continue
 			}
@@ -536,7 +538,15 @@ func (s *solana) reconcileOrderTokenAccount(ctx context.Context, order model.Ord
 				t.BlockNum = int(result.Get("slot").Int())
 			}
 			if t.Timestamp.IsZero() {
-				t.Timestamp = time.Unix(result.Get("blockTime").Int(), 0)
+				t.Timestamp = signatureTimestamp
+			}
+			if t.Timestamp.IsZero() {
+				// Neither RPC result provided a trustworthy time, so this candidate
+				// cannot safely pass the order's payment window check.
+				continue
+			}
+			if !model.IsAmountValid(t.TradeType, t.Amount) {
+				continue
 			}
 			if !orderTransferMatch(order, t) {
 				continue
@@ -605,6 +615,12 @@ func parseSolanaParsedTransfers(tx gjson.Result) []transfer {
 		}
 	}
 
+	blockTime := tx.Get("blockTime").Int()
+	timestamp := time.Time{}
+	if blockTime > 0 {
+		timestamp = time.Unix(blockTime, 0)
+	}
+
 	transfers := make([]transfer, 0)
 	instructions := tx.Get("transaction.message.instructions").Array()
 	for _, inner := range tx.Get("meta.innerInstructions").Array() {
@@ -655,7 +671,7 @@ func parseSolanaParsedTransfers(tx gjson.Result) []transfer {
 			Amount:      decimal.NewFromBigInt(amountInt, -int32(decimals)),
 			FromAddress: from.Address,
 			RecvAddress: to.Address,
-			Timestamp:   time.Unix(tx.Get("blockTime").Int(), 0),
+			Timestamp:   timestamp,
 			TradeType:   from.TradeType,
 			BlockNum:    int(tx.Get("slot").Int()),
 		})

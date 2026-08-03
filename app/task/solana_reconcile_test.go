@@ -155,6 +155,196 @@ func TestSolanaReconcileWaitingOrdersMarksMatchingOrderConfirming(t *testing.T) 
 	}
 }
 
+func TestSolanaReconcileRejectsBelowMinimumAmountForAddressLockedOrder(t *testing.T) {
+	initSolanaReconcileTestLog(t)
+
+	if err := model.Init(filepath.Join(t.TempDir(), "solana-reconcile-low-amount.db"), "", ""); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	t.Cleanup(model.Close)
+
+	blockTime := time.Now().Add(-time.Minute).Unix()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode rpc request: %v", err)
+		}
+
+		switch req["method"] {
+		case "getSignaturesForAddress":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":[{"signature":"%s","slot":424729879,"err":null,"blockTime":%d}]}`, testSolanaTxHash, blockTime)))
+		case "getTransaction":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"jsonrpc":"2.0",
+				"id":1,
+				"result":{
+					"slot":424729879,
+					"blockTime":%d,
+					"meta":{
+						"err":null,
+						"preTokenBalances":[
+							{"accountIndex":2,"mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+							{"accountIndex":3,"mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+						],
+						"postTokenBalances":[
+							{"accountIndex":2,"mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+							{"accountIndex":3,"mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+						],
+						"innerInstructions":[]
+					},
+					"transaction":{"message":{
+						"accountKeys":[
+							{"pubkey":"%s"},
+							{"pubkey":"13gxbc8s6rPLDXPMiTnbnKD6uVdddzKpUCBZA5iCmZkd"},
+							{"pubkey":"7KJjY7rArbydeLBF7gQ5LdqXRKRYyPArT99NEctsHsgU"},
+							{"pubkey":"%s"}
+						],
+						"instructions":[{"program":"spl-token","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","parsed":{"type":"transferChecked","info":{"source":"7KJjY7rArbydeLBF7gQ5LdqXRKRYyPArT99NEctsHsgU","destination":"%s","tokenAmount":{"amount":"1000","decimals":6}}}}]
+					}}
+				}
+			}`, blockTime, testSolanaSender, testSolanaOwner, testSolanaSender, testSolanaOwner, testSolanaSender, testSolanaTokenWallet, testSolanaTokenWallet)))
+		default:
+			t.Fatalf("unexpected rpc method: %v", req["method"])
+		}
+	}))
+	defer server.Close()
+
+	model.SetK(model.RpcEndpointSolana, server.URL)
+	model.RefreshC()
+
+	createdAtTime := time.Unix(blockTime-30, 0)
+	createdAt := model.Datetime(createdAtTime)
+	zero := time.Unix(0, 0)
+	order := model.Order{
+		OrderId:       "solana-low-amount",
+		TradeId:       "solana-low-amount-trade",
+		TradeType:     model.UsdcSolana,
+		Crypto:        model.USDC,
+		Amount:        "0",
+		Money:         "0",
+		Address:       testSolanaOwner,
+		AddressLocked: true,
+		Status:        model.OrderStatusWaiting,
+		ConfirmedAt:   &zero,
+		ExpiredAt:     time.Unix(blockTime+30, 0),
+		AutoTimeAt: model.AutoTimeAt{
+			CreatedAt: &createdAt,
+			UpdatedAt: &createdAt,
+		},
+	}
+	if err := model.Db.Create(&order).Error; err != nil {
+		t.Fatalf("create address-locked order: %v", err)
+	}
+
+	s := newSolana()
+	s.client = server.Client()
+	if s.reconcileOrderTokenAccount(context.Background(), order, testSolanaTokenWallet) {
+		t.Fatal("below-minimum Solana transfer must not reconcile an address-locked order")
+	}
+
+	var refreshed model.Order
+	if err := model.Db.First(&refreshed, order.ID).Error; err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if refreshed.Status != model.OrderStatusWaiting {
+		t.Fatalf("below-minimum Solana transfer changed order status to %d, want waiting", refreshed.Status)
+	}
+}
+
+func TestSolanaReconcileUsesSignatureTimeWhenTransactionBlockTimeIsMissing(t *testing.T) {
+	initSolanaReconcileTestLog(t)
+
+	if err := model.Init(filepath.Join(t.TempDir(), "solana-reconcile-signature-time.db"), "", ""); err != nil {
+		t.Fatalf("init test db: %v", err)
+	}
+	t.Cleanup(model.Close)
+
+	blockTime := time.Now().Add(-time.Minute).Unix()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode rpc request: %v", err)
+		}
+
+		switch req["method"] {
+		case "getSignaturesForAddress":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"result":[{"signature":"%s","slot":424729879,"err":null,"blockTime":%d}]}`, testSolanaTxHash, blockTime)))
+		case "getTransaction":
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"jsonrpc":"2.0",
+				"id":1,
+				"result":{
+					"slot":424729879,
+					"blockTime":null,
+					"meta":{
+						"err":null,
+						"preTokenBalances":[
+							{"accountIndex":0,"mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"},
+							{"accountIndex":1,"mint":"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v","owner":"%s","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"}
+						],
+						"postTokenBalances":[],
+						"innerInstructions":[]
+					},
+					"transaction":{"message":{
+						"accountKeys":[{"pubkey":"source-token-account"},{"pubkey":"%s"}],
+						"instructions":[{"program":"spl-token","programId":"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA","parsed":{"type":"transferChecked","info":{"source":"source-token-account","destination":"%s","tokenAmount":{"amount":"2650000","decimals":6}}}}]
+					}}
+				}
+			}`, testSolanaSender, testSolanaOwner, testSolanaTokenWallet, testSolanaTokenWallet)))
+		default:
+			t.Fatalf("unexpected rpc method: %v", req["method"])
+		}
+	}))
+	defer server.Close()
+
+	model.SetK(model.RpcEndpointSolana, server.URL)
+	model.RefreshC()
+
+	createdAtTime := time.Unix(blockTime-30, 0)
+	createdAt := model.Datetime(createdAtTime)
+	zero := time.Unix(0, 0)
+	order := model.Order{
+		OrderId:     "solana-signature-time",
+		TradeId:     "solana-signature-time-trade",
+		TradeType:   model.UsdcSolana,
+		Crypto:      model.USDC,
+		Amount:      "2.65",
+		Money:       "20",
+		Address:     testSolanaOwner,
+		Status:      model.OrderStatusWaiting,
+		ConfirmedAt: &zero,
+		ExpiredAt:   time.Unix(blockTime+30, 0),
+		AutoTimeAt: model.AutoTimeAt{
+			CreatedAt: &createdAt,
+			UpdatedAt: &createdAt,
+		},
+	}
+	if err := model.Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	s := newSolana()
+	s.client = server.Client()
+	if !s.reconcileOrderTokenAccount(context.Background(), order, testSolanaTokenWallet) {
+		t.Fatal("reconcile should use the signature-list block time when getTransaction omits it")
+	}
+
+	var refreshed model.Order
+	if err := model.Db.First(&refreshed, order.ID).Error; err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if refreshed.Status != model.OrderStatusConfirming {
+		t.Fatalf("missing getTransaction block time left order status %d, want confirming", refreshed.Status)
+	}
+	if refreshed.ConfirmedAt == nil || refreshed.ConfirmedAt.Unix() != blockTime {
+		t.Fatalf("confirmed_at = %v, want signature-list block time %d", refreshed.ConfirmedAt, blockTime)
+	}
+}
+
 func initSolanaReconcileTestLog(t *testing.T) {
 	t.Helper()
 
