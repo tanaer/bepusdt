@@ -232,6 +232,54 @@ func TestVerifyTransactionRejectsUnsupportedNetworkBeforeIdempotency(t *testing.
 	}
 }
 
+func TestVerifyTransactionRejectsOversizedInputBeforeVerifier(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newVerifyTransactionTestOrder("oversized-transaction-hash", model.UsdcSolana, model.OrderStatusWaiting, now)
+	if err := model.Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	called := false
+	originalVerifier := verifyAndClaimSubmittedPayment
+	verifyAndClaimSubmittedPayment = func(context.Context, *model.Order, string) (bool, error) {
+		called = true
+		return false, nil
+	}
+	t.Cleanup(func() { verifyAndClaimSubmittedPayment = originalVerifier })
+
+	for _, tc := range []struct {
+		name string
+		hash string
+	}{
+		{name: "hash field is shorter than every supported transaction hash", hash: strings.Repeat("2", 63)},
+		{name: "hash field exceeds its limit", hash: strings.Repeat("2", 89)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			called = false
+			response := invokeVerifyTransaction(t, order.TradeId, tc.hash)
+			assertVerifyTransactionErrorCode(t, response, "invalid_hash")
+			if called {
+				t.Fatal("verifier must not run for an out-of-range transaction hash")
+			}
+		})
+	}
+
+	t.Run("request body exceeds its limit", func(t *testing.T) {
+		called = false
+		payload := `{"trade_id":` + strconv.Quote(order.TradeId) + `,"tx_hash":` + strconv.Quote(strings.Repeat("2", 64)) + `,"padding":` + strconv.Quote(strings.Repeat("x", 2048)) + `}`
+		response := invokeVerifyTransactionPayload(t, payload)
+		assertVerifyTransactionErrorCode(t, response, "invalid_hash")
+		if called {
+			t.Fatal("verifier must not run when the request body exceeds its limit")
+		}
+	})
+}
+
 func TestVerifyTransactionReturnsStableErrorCodes(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	if err := model.Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {

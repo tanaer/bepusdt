@@ -26,6 +26,10 @@ var (
 const (
 	paymentClaimSQLiteBusyMaxAttempts = 3
 	paymentClaimSQLiteBusyRetryDelay  = 5 * time.Millisecond
+	// SolanaSignatureMinLength and SolanaSignatureMaxLength cover every
+	// canonical Base58 representation of a 64-byte Solana transaction signature.
+	SolanaSignatureMinLength = 64
+	SolanaSignatureMaxLength = 88
 )
 
 // PaymentHashClaim is a durable, cross-process uniqueness guard. A payment
@@ -73,6 +77,9 @@ func paymentHashClaimKey(tradeType TradeType, hash string) (string, error) {
 	hash = strings.TrimSpace(hash)
 	if !isSolanaPaymentTrade(tradeType) {
 		return canonicalPaymentHash(tradeType, hash), nil
+	}
+	if len(hash) < SolanaSignatureMinLength || len(hash) > SolanaSignatureMaxLength {
+		return "", fmt.Errorf("claim payment confirmation: invalid Solana transaction hash")
 	}
 
 	decoded := base58.Decode(hash)

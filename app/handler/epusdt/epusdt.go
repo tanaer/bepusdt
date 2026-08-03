@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"net/http"
 	"strings"
 	"time"
 
@@ -19,6 +20,12 @@ import (
 )
 
 type Epusdt struct{}
+
+const (
+	verifyTransactionMaxRequestBodyBytes = 1024
+	verifyTransactionMaxTradeIDBytes     = 128
+	verifyTransactionMaxHashBytes        = 88
+)
 
 type createReq struct {
 	OrderID     string     `json:"order_id" binding:"required"`
@@ -70,6 +77,13 @@ type methodsReq struct {
 type verifyTransactionReq struct {
 	TradeID string `json:"trade_id" binding:"required"`
 	TxHash  string `json:"tx_hash" binding:"required"`
+}
+
+func (r *verifyTransactionReq) normalizeAndValidate() bool {
+	r.TradeID = strings.TrimSpace(r.TradeID)
+	r.TxHash = strings.TrimSpace(r.TxHash)
+	return r.TradeID != "" && len(r.TradeID) <= verifyTransactionMaxTradeIDBytes &&
+		len(r.TxHash) >= 64 && len(r.TxHash) <= verifyTransactionMaxHashBytes
 }
 
 var verifyAndClaimSubmittedPayment = task.VerifyAndClaimSubmittedPayment
@@ -444,8 +458,11 @@ func (Epusdt) Info(ctx *gin.Context) {
 func (Epusdt) VerifyTransaction(ctx *gin.Context) {
 	startedAt := time.Now()
 	var req verifyTransactionReq
-	if err := ctx.ShouldBindJSON(&req); err != nil {
-		respondVerifyTransactionFailure(ctx, req.TradeID, "", req.TxHash, "invalid transaction verification request", "invalid_hash", startedAt)
+	ctx.Request.Body = http.MaxBytesReader(ctx.Writer, ctx.Request.Body, verifyTransactionMaxRequestBodyBytes)
+	if err := ctx.ShouldBindJSON(&req); err != nil || !req.normalizeAndValidate() {
+		// Do not reflect an invalid request's unbounded fields to the structured
+		// log. This path also applies when MaxBytesReader stops an oversized body.
+		respondVerifyTransactionFailure(ctx, "", "", "", "invalid transaction verification request", "invalid_hash", startedAt)
 		return
 	}
 

@@ -80,6 +80,9 @@ func TestOfficialCheckoutTransactionHashVerificationControlsAreEmbedded(t *testi
 				"verify-transaction",
 				"showTimeout",
 				"createTransactionHashForm",
+				"var minTransactionHashLength = 64;",
+				"var maxTransactionHashLength = 88;",
+				"txHash.length < minTransactionHashLength || txHash.length > maxTransactionHashLength",
 			},
 		},
 		{

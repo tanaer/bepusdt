@@ -11,6 +11,8 @@
     var selCur = '', selMethod = null;
     var cfg = {}, tradeId = '';
     var cdTimer = null, stTimer = null;
+    var minTransactionHashLength = 64;
+    var maxTransactionHashLength = 88;
 
     function detectLang() {
         try {
@@ -112,6 +114,11 @@
         var txHash = input && input.value ? input.value.trim() : '';
         if (!txHash) {
             setTransactionHashStatus(statusEl, t('transactionHashRequired', '请输入交易哈希'), 'error');
+            if (input) input.focus();
+            return;
+        }
+        if (txHash.length < minTransactionHashLength || txHash.length > maxTransactionHashLength) {
+            setTransactionHashStatus(statusEl, t('transactionHashErrors.invalid_hash', '交易哈希格式无效，请检查后重试。'), 'error');
             if (input) input.focus();
             return;
         }

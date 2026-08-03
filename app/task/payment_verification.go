@@ -100,6 +100,9 @@ func normalizeSubmittedPaymentHash(tradeType model.TradeType, hash string) (stri
 		}
 		return "0x" + strings.TrimPrefix(strings.ToLower(hash), "0x"), nil
 	case isSolanaTrade(tradeType):
+		if len(hash) < model.SolanaSignatureMinLength || len(hash) > model.SolanaSignatureMaxLength {
+			return "", ErrInvalidSubmittedPaymentHash
+		}
 		decoded := base58.Decode(hash)
 		if len(decoded) != 64 || base58.Encode(decoded) != hash {
 			return "", ErrInvalidSubmittedPaymentHash

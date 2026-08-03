@@ -270,6 +270,56 @@ func TestClaimPaymentConfirmationPreservesCaseSensitiveSolanaSignature(t *testin
 	}
 }
 
+func TestPaymentHashClaimKeyRejectsOutOfRangeSolanaSignature(t *testing.T) {
+	for _, hash := range []string{
+		strings.Repeat("1", 63),
+		strings.Repeat("1", 89),
+	} {
+		if _, err := paymentHashClaimKey(UsdcSolana, hash); err == nil {
+			t.Fatalf("payment claim key accepted out-of-range Solana signature length %d", len(hash))
+		}
+	}
+}
+
+func TestClaimPaymentConfirmationRejectsOutOfRangeSolanaSignature(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "bepusdt.db"), "", ""); err != nil {
+		t.Fatalf("initialize test database: %v", err)
+	}
+
+	now := time.Now().UTC()
+	order := newPaymentClaimTestOrder("oversized-solana-payment-claim", now)
+	order.TradeType = UsdcSolana
+	if err := Db.Create(&order).Error; err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+
+	_, err := ClaimPaymentConfirmation(&order, PaymentConfirmation{
+		BlockNum: 1,
+		From:     "sender",
+		Hash:     strings.Repeat("1", 89),
+		At:       now.Add(time.Second),
+		Amount:   decimal.RequireFromString("1.00"),
+	})
+	if err == nil {
+		t.Fatal("claim out-of-range Solana signature error = nil, want rejection")
+	}
+
+	var refreshed Order
+	if err := Db.First(&refreshed, order.ID).Error; err != nil {
+		t.Fatalf("reload order: %v", err)
+	}
+	if refreshed.Status != OrderStatusWaiting || refreshed.RefHash != "" {
+		t.Fatalf("order must remain unclaimed: %+v", refreshed)
+	}
+	var claimCount int64
+	if err := Db.Model(&PaymentHashClaim{}).Count(&claimCount).Error; err != nil {
+		t.Fatalf("count payment claims: %v", err)
+	}
+	if claimCount != 0 {
+		t.Fatalf("payment claim count = %d, want zero", claimCount)
+	}
+}
+
 func TestPaymentHashEqualUsesChainSpecificCanonicalization(t *testing.T) {
 	const solanaSignature = "2gqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"
 	const solanaCaseVariant = "2GqC3gYGfdNMQkF5xhZXmofbjuu3RbdZZrKz7pYvuArMpqgHSvvrQb25AuDVvtsswxkfjWZbDDouH1FBFWwgYkD4"

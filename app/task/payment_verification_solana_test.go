@@ -31,6 +31,7 @@ func TestNormalizeSubmittedPaymentHashSolana(t *testing.T) {
 	for _, invalid := range []string{
 		"0" + submittedSolanaSignature[1:],
 		strings.Repeat("1", 63),
+		strings.Repeat("1", 89),
 		"not base58!",
 	} {
 		if _, err := normalizeSubmittedPaymentHash(model.UsdcSolana, invalid); !errors.Is(err, ErrInvalidSubmittedPaymentHash) {
