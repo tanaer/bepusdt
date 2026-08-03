@@ -73,6 +73,16 @@ TRON 和 EVM/BSC 哈希继续沿用规范化后的十六进制大小写不敏感
 - `order_not_receivable`
 - `verification_unavailable`
 
+失败响应的错误代码位于顶层字段。例如，不支持的支付方式返回：
+
+```json
+{
+  "status_code": 400,
+  "message": "transaction hash verification is not available for this payment network",
+  "error_code": "unsupported_network"
+}
+```
+
 ## 可追溯性
 
 每次验证请求记录结构化日志：订单交易号、交易类型、提交哈希、结果、错误代码和 RPC 耗时。此版本不引入新的数据库审计表。成功记录由订单字段和 `PaymentHashClaim` 持久化。
@@ -90,6 +100,7 @@ TRON 和 EVM/BSC 哈希继续沿用规范化后的十六进制大小写不敏感
 - TRON 和 BSC 保持既有验单能力；
 - `can_verify_transaction_hash` 只对允许的交易类型为真；
 - 官方模板仅对支持支付方式显示表单，并展示准确的失败原因。
+- 订单超时后，支持类型的提交控件仍可点击并发送验单请求。
 
 ## 非目标
 

@@ -161,7 +161,7 @@ Run:
 
 - [ ] **Step 1: 写失败测试**
 
-让 handler 的替身验证器分别返回无效 Hash、不支持网络、未找到交易、不匹配、已被认领、不可接收订单和 RPC 错误。断言 JSON 响应保留 status_code: 400、保留兼容 message，并返回相应 error_code。
+让 handler 的替身验证器分别返回无效 Hash、不支持网络、未找到交易、不匹配、已被认领、不可接收订单和 RPC 错误。断言 JSON 响应保留 status_code: 400、保留兼容 message，并在顶层返回相应 error_code。
 
 - [ ] **Step 2: 运行测试，确认响应中没有 error_code**
 
@@ -198,7 +198,7 @@ Run:
 
 - [ ] **Step 1: 写模板静态失败测试**
 
-在 router 测试中断言官方模板包含默认隐藏的 transactionHashForm、超时场景入口和必要的 data/i18n 标记；断言脚本读取后端 can_verify_transaction_hash 并使用 error_code，而不是前端链种白名单。
+在 router 测试中断言官方模板包含默认隐藏的 transactionHashForm、超时场景入口和必要的 data/i18n 标记；断言脚本读取后端 can_verify_transaction_hash 并使用 error_code，而不是前端链种白名单。测试还应检查超时路径调用可用的提交入口，而不是只把表单留在被遮罩层覆盖的 DOM 中。
 
 - [ ] **Step 2: 运行测试，确认当前模板没有入口**
 
